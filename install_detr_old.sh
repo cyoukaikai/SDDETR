@@ -9,9 +9,9 @@ rm -rf SDDETR
 
 
 mkdir DN-DETR
-mv DN-DETR.zip DN-DETR
+mv DN-DETR_old.zip DN-DETR
 cd DN-DETR
-unzip DN-DETR.zip 
+unzip DETR_old.zip 
 
 
 ############################################

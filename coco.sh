@@ -36,4 +36,4 @@ rm stuff_annotations_trainval2017.zip
 #rm image_info_test2017.zip
 #rm image_info_unlabeled2017.zip
 
-mv annotations coco
+mv annotations coco/.
