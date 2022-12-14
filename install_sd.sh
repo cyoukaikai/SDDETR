@@ -2,6 +2,9 @@
 
 # chmod +x coco.sh
 ############################################
+
+
+
 cd smrc
 pip install -r requirements.txt
 
