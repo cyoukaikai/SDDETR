@@ -38,10 +38,6 @@ install_other() {
 
 }
 
-install_zhinengyun_coco() {
- wget http://datasets.blockelite.cn/20.COCO_2017/train2017.zip
- 
-}
 
 ############################################
 
@@ -50,7 +46,7 @@ install_gcp_coco() {
 	./coco.sh
 }
 
-git clone https://github.com/cyoukaikai/SDDETR.git
+# git clone https://github.com/cyoukaikai/SDDETR.git
 
 cd SDDETR
 unzip '*.zip' #unzip DN-DETR_old.zip 
@@ -65,6 +61,8 @@ install_detr DN-DETR_old
 
 ###################
 install_other
+
+# gdown --folder https://drive.google.com/drive/folders/1h4PB9DO7_I0TRwU62Wy0x3ixti8Gfjc3
 
 
 echo 8b14dd204de425f8a0c700ab58d00ec9ce60db4b
