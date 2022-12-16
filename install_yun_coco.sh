@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
 
+
+
+
 wget http://datasets.blockelite.cn/20.COCO_2017/annotations_trainval2017.zip
 wget http://datasets.blockelite.cn/20.COCO_2017/train2017.zip
 wget http://datasets.blockelite.cn/20.COCO_2017/val2017.zip
