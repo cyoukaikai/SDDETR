@@ -55,9 +55,9 @@ mv -rf DN-DETR
 
 install_detr DN-DETR
 
-#mv DN-DETR_old/DN-DETR_old/* DN-DETR_old/ 
-#mv -rf DN-DETR_old
-#install_detr DN-DETR_old
+mv DN-DETR_old/DN-DETR_old/* DN-DETR_old/ 
+mv -rf DN-DETR_old
+install_detr DN-DETR_old
 
 ###################
 install_other
