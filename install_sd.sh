@@ -7,7 +7,9 @@ install_detr() {
 
 	cur_path_=$PWD
 	cd $dir_
-
+	
+	chmod +x *.sh
+	
 	cd smrc
 	pip install -r requirements.txt
 
@@ -49,15 +51,14 @@ install_gcp_coco() {
 # git clone https://github.com/cyoukaikai/SDDETR.git
 
 cd SDDETR
-unzip '*.zip' #unzip DN-DETR_old.zip 
-#mv DN-DETR/DN-DETR/* DN-DETR/
-mv -rf DN-DETR
+unzip 'DN-DETR*.zip' 
 
+#mv DN-DETR/DN-DETR/* DN-DETR/
+#rm -rf DN-DETR
 install_detr DN-DETR
 
-mv DN-DETR_old/DN-DETR_old/* DN-DETR_old/ 
-mv -rf DN-DETR_old
-install_detr DN-DETR_old
+#mv DN-DETR_old/DN-DETR_old/* DN-DETR_old/ 
+#install_detr DN-DETR_old
 
 ###################
 install_other
