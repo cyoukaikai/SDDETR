@@ -35,6 +35,8 @@ install_other() {
 	pip install wandb
 	pip install opencv-python-headless==4.5.2.52
 	
+	sudo apt-get install nano
+	sudo apt-get install tmux
 	touch ~/.tmux.conf
 	echo "setw -g mouse on" >> ~/.tmux.conf
 	tmux source-file ~/.tmux.conf
