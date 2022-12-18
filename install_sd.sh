@@ -33,10 +33,11 @@ install_detr() {
 
 install_other() {
 	pip install wandb
+	pip install opencv-python-headless==4.5.2.52
 	
-	#touch ~/.tmux.conf
-	#echo "setw -g mouse on" >> ~/.tmux.conf
-	#tmux source-file ~/.tmux.conf
+	touch ~/.tmux.conf
+	echo "setw -g mouse on" >> ~/.tmux.conf
+	tmux source-file ~/.tmux.conf
 
 }
 
