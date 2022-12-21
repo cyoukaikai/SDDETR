@@ -35,12 +35,16 @@ install_other() {
 	pip install wandb
 	pip install opencv-python-headless==4.5.2.52
 	
-	sudo apt-get install nano
-	sudo apt-get install tmux
+	
+	
+
 	touch ~/.tmux.conf
 	echo "setw -g mouse on" >> ~/.tmux.conf
-	tmux source-file ~/.tmux.conf
-
+	#tmux source-file ~/.tmux.conf
+	
+echo 8b14dd204de425f8a0c700ab58d00ec9ce60db4b
+# tmux new -s train
+#wandb login
 }
 
 
@@ -51,22 +55,21 @@ install_gcp_coco() {
 	./coco.sh
 }
 
-# git clone https://github.com/cyoukaikai/SDDETR.git
 
-cd SDDETR
-unzip 'DN-DETR*.zip' 
+install_detr DN-DETR
+install_other
+
+# git clone https://github.com/cyoukaikai/SDDETR.git
+#cd SDDETR
+#unzip 'DN-DETR*.zip' 
 
 #mv DN-DETR/DN-DETR/* DN-DETR/
 #rm -rf DN-DETR
-install_detr DN-DETR
-
 #mv DN-DETR_old/DN-DETR_old/* DN-DETR_old/ 
 #install_detr DN-DETR_old
-
-###################
-install_other
-
 # gdown --folder https://drive.google.com/drive/folders/1h4PB9DO7_I0TRwU62Wy0x3ixti8Gfjc3
+###################
+
 
 
 
