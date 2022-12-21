@@ -19,6 +19,10 @@ chmod +x *.sh
 Run the code
 
 ```
-./triple_attn.sh
+wandb login  
+8b14dd204de425f8a0c700ab58d00ec9ce60db4b   (password)
+
+./share_attn.sh
+
 
 ```
