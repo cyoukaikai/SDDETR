@@ -1,0 +1,7 @@
+some detection package
+https://github.com/ultralytics/yolov3
+https://github.com/Zhongdao/Towards-Realtime-MOT
+
+I should use the latest detection lib for fast detections.
+Try to avoid wasting time on how to conduct detection.
+Just use the linux/darknet detection results as input, or the annotated bbox as input.

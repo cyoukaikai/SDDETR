@@ -56,6 +56,15 @@ install_gcp_coco() {
 }
 
 
+
+
+
+#git clone https://github.com/cyoukaikai/SDDETR.git
+#mv SDDETR/DN-DETR .
+#chmod +x *.sh
+chmod +x DN-DETR/*.sh
+
+
 install_detr DN-DETR
 install_other
 

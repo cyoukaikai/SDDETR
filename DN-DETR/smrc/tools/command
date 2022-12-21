@@ -1,0 +1,14 @@
+
+ (mask-rcnn) kai@kai:~/tuat$ python smrc/tools/video2rames_tool.py -i test_data/test_videos
+
+ python smrc/tools/frame2video_tool.py -i test_data/test_images
+
+
+(smrc) kai@kai:~/Annotation$ python smrc/tools/move_sub_dir_tool.py -s data/ACA_Distance_1000_taxi_detection_v3format_labels0.2_nms0.5 -t data/done -d done
+
+
+
+python smrc/tools/move_sub_dir_tool.py -s /media/kai/TUAT/ACA_Distance_1000_taxi_detection_v3format_labels0.2_nms0.5 -t /media/kai/TUAT/raw_ -d /media/kai/TUAT/done_video_list
+
+
+python smrc/tools/move_sub_dir_tool.py -i /media/kai/TUAT/ACA_Distance_1000_taxi_detection_v3format_labels0.2_nms0.5 -o /media/kai/TUAT/done -d /media/kai/TUAT/tuat_done_videos

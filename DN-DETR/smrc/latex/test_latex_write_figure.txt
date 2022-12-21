@@ -1,0 +1,21 @@
+\begin{figure}[th!]
+\centering
+\subfigure[817903a/0021.jpg]{\includegraphics[width=0.31\textwidth]{/home/kai/tuat/data/segmentation_results_annotation_visualization/817903a/0021.jpg}}
+\subfigure[817903a/0042.jpg]{\includegraphics[width=0.31\textwidth]{/home/kai/tuat/data/segmentation_results_annotation_visualization/817903a/0042.jpg}}
+\subfigure[817903a/0114.jpg]{\includegraphics[width=0.31\textwidth]{/home/kai/tuat/data/segmentation_results_annotation_visualization/817903a/0114.jpg}}
+\subfigure[843677a/0049.jpg]{\includegraphics[width=0.31\textwidth]{/home/kai/tuat/data/segmentation_results_annotation_visualization/843677a/0049.jpg}}
+\subfigure[843677a/0094.jpg]{\includegraphics[width=0.31\textwidth]{/home/kai/tuat/data/segmentation_results_annotation_visualization/843677a/0094.jpg}}
+\subfigure[883363a/0016.jpg]{\includegraphics[width=0.31\textwidth]{/home/kai/tuat/data/segmentation_results_annotation_visualization/883363a/0016.jpg}}
+\subfigure[883363a/0078.jpg]{\includegraphics[width=0.31\textwidth]{/home/kai/tuat/data/segmentation_results_annotation_visualization/883363a/0078.jpg}}
+\subfigure[883363a/0092.jpg]{\includegraphics[width=0.31\textwidth]{/home/kai/tuat/data/segmentation_results_annotation_visualization/883363a/0092.jpg}}
+\subfigure[883363a/0104.jpg]{\includegraphics[width=0.31\textwidth]{/home/kai/tuat/data/segmentation_results_annotation_visualization/883363a/0104.jpg}}
+\subfigure[883363a/0118.jpg]{\includegraphics[width=0.31\textwidth]{/home/kai/tuat/data/segmentation_results_annotation_visualization/883363a/0118.jpg}}
+\subfigure[883363a/0119.jpg]{\includegraphics[width=0.31\textwidth]{/home/kai/tuat/data/segmentation_results_annotation_visualization/883363a/0119.jpg}}
+\subfigure[883363a/0121.jpg]{\includegraphics[width=0.31\textwidth]{/home/kai/tuat/data/segmentation_results_annotation_visualization/883363a/0121.jpg}}
+\subfigure[883363a/0130.jpg]{\includegraphics[width=0.31\textwidth]{/home/kai/tuat/data/segmentation_results_annotation_visualization/883363a/0130.jpg}}
+\caption{image visualization}
+\label{fig:table0}
+\end{figure}
+
+
+\clearpage
