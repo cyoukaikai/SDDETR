@@ -20,8 +20,9 @@ import datasets
 import util.misc as utils
 from datasets import build_dataset, get_coco_api_from_dataset
 from engine import evaluate, train_one_epoch
-from models import build_DABDETR, build_dab_deformable_detr, \
-    build_dab_deformable_detr_deformable_encoder_only, build_SGDT_DABDETR, build_token_classifier
+from models import build_DABDETR, build_SGDT_DABDETR, build_token_classifier
+# build_dab_deformable_detr, \
+#     build_dab_deformable_detr_deformable_encoder_only,
 
 from util.utils import clean_state_dict
 
@@ -378,10 +379,10 @@ def get_args_parser():
 def build_model_main(args):
     if args.modelname.lower() == 'dn_dab_detr':
         model, criterion, postprocessors = build_DABDETR(args)
-    elif args.modelname.lower() == 'dn_dab_deformable_detr':
-        model, criterion, postprocessors = build_dab_deformable_detr(args)
-    elif args.modelname.lower() == 'dn_dab_deformable_detr_deformable_encoder_only':
-        model, criterion, postprocessors = build_dab_deformable_detr_deformable_encoder_only(args)
+    # elif args.modelname.lower() == 'dn_dab_deformable_detr':
+    #     model, criterion, postprocessors = build_dab_deformable_detr(args)
+    # elif args.modelname.lower() == 'dn_dab_deformable_detr_deformable_encoder_only':
+    #     model, criterion, postprocessors = build_dab_deformable_detr_deformable_encoder_only(args)
     elif args.modelname.lower() == 'sgdt_dn_dab_detr':
         model, criterion, postprocessors = build_SGDT_DABDETR(args)
     elif args.modelname.lower() == 'sgdt_token_fg_bg_classifier':
