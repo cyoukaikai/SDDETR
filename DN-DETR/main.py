@@ -248,6 +248,7 @@ def get_args_parser():
                          'teacher_model_use_pretrained_v_shared_double_attn52_6ap_lr1_not_converged',
                          'teacher_model_use_pretrained_v_shared_double_attn52_6ap',
                          'teacher_model_use_pretrained_attn_learning_model',
+                         'share_double_head_transformer_ShareV_out_proj_FFN_E6D6',
                          ])
     parser.add_argument('--with_teacher_model_for_feature_attn_sharing', action='store_true')
     parser.add_argument('--is_teacher_model', action='store_true')
@@ -1109,9 +1110,13 @@ def main(args):
                     '--resume', f'{os.path.join(LIB_ROOT_DIR, "logs/checkpoint_optimized_44.7ap.pth")}',
                 ]
             )
-        elif args.with_teacher_model in ['teacher_model_use_pretrained_v_shared_double_attn52_2ap',
-                                         'teacher_model_use_pretrained_v_shared_double_attn52_6ap',
-                                         'teacher_model_use_pretrained_v_shared_double_attn52_6ap_lr1_not_converged']:
+        elif args.with_teacher_model in [
+            'teacher_model_use_pretrained_v_shared_double_attn52_2ap',
+             'teacher_model_use_pretrained_v_shared_double_attn52_6ap',
+             'teacher_model_use_pretrained_v_shared_double_attn52_6ap_lr1_not_converged',
+            'share_double_head_transformer_ShareV_out_proj_FFN_E6D6',
+
+        ]:
             """
             # to start from epoch 10
             pad_fg_pixel=0
@@ -1186,33 +1191,60 @@ def main(args):
               --eval \
               --debug 
             """
-            if args.with_teacher_model == 'teacher_model_use_pretrained_v_shared_double_attn52_6ap':
-                out_dir_ = 'logs/e6-d6-gt_split_only/share_double_head_transformer_ShareV_out_proj_FFN'
-            elif args.with_teacher_model == 'teacher_model_use_pretrained_v_shared_double_attn52_6ap_lr1_not_converged':
-                out_dir_ = 'logs/e6-d6-gt_split_only/teacher_model_use_pretrained_v_shared_double_attn52_6ap_lr1_not_converged'
+
+            if args.with_teacher_model == 'share_double_head_transformer_ShareV_out_proj_FFN_E6D6':
+                # print(f'out_dir_ = {out_dir_}')
+                out_dir_ = 'logs/e6-d6-gt_split_only/share_double_head_transformer_ShareV_out_proj_FFN_E6D6'
+                args_pretrained_model = proposal_parser.parse_args(
+                    args=
+                    [
+                        '-m', 'sgdt_dn_dab_detr',
+                        '--output_dir', f'{out_dir_}',
+                        '--coco_path', f'{os.path.join(LIB_ROOT_DIR, "coco")}',
+                        '--use_dn',
+                        '--encoder_layer_config', 'regular_5-DualAttnShareVOutProjFFN_1', #  TODO: Adapt this
+                        '--pretrain_model_path', f'{os.path.join(out_dir_, "checkpoint_transfer_weight.pth")}',  # TODO:
+                        '--token_scoring_discard_split_criterion', 'gt_only_exp-no_bg_token_remove',
+                        '--token_scoring_loss_criterion', 'gt_fg_scale_fake',
+                        '--token_scoring_gt_criterion', 'significance_value',
+                        '--pad_fg_pixel', '0',
+                        '--transformer_type', 'share_double_head_transformer',
+                        '--decoder_layer_config', 'regular_6',  # TODO: Adapt this
+                        '--token_masking', 'sMLP',
+                        '--token_masking_loc', 'K',
+                        '--is_teacher_model',
+                    ]
+                )
             else:
-                out_dir_ = 'logs/e6-d6-gt_split_only/share_double_head_transformer_ShareV_out_proj_FFN_lr0.1_from_epoch35'
-            # print(f'out_dir_ = {out_dir_}')
-            args_pretrained_model = proposal_parser.parse_args(
-                args=
-                [
-                    '-m', 'sgdt_dn_dab_detr',
-                    '--output_dir', f'{out_dir_}',
-                    '--coco_path', f'{os.path.join(LIB_ROOT_DIR, "coco")}',
-                    '--use_dn',
-                    '--encoder_layer_config', 'regular_4-DualAttnShareVOutProjFFN_1',
-                    '--pretrain_model_path', f'{os.path.join(out_dir_, "checkpoint_transfer_weight.pth")}',  # TODO:
-                    '--token_scoring_discard_split_criterion', 'gt_only_exp-no_bg_token_remove',
-                    '--token_scoring_loss_criterion', 'gt_fg_scale_fake',
-                    '--token_scoring_gt_criterion', 'significance_value',
-                    '--pad_fg_pixel', '0',
-                    '--transformer_type', 'share_double_head_transformer',
-                    '--decoder_layer_config', 'regular_4',  # TODO: Adapt this based on different experiments
-                    '--token_masking', 'sMLP',
-                    '--token_masking_loc', 'K',
-                    '--is_teacher_model',
-                ]
-            )
+                if args.with_teacher_model == 'teacher_model_use_pretrained_v_shared_double_attn52_6ap':
+                    out_dir_ = 'logs/e6-d6-gt_split_only/share_double_head_transformer_ShareV_out_proj_FFN'
+                elif args.with_teacher_model == 'teacher_model_use_pretrained_v_shared_double_attn52_6ap_lr1_not_converged':
+                    out_dir_ = 'logs/e6-d6-gt_split_only/teacher_model_use_pretrained_v_shared_double_attn52_6ap_lr1_not_converged'
+                elif args.with_teacher_model == 'teacher_model_use_pretrained_v_shared_double_attn52_2ap':
+                    out_dir_ = 'logs/e6-d6-gt_split_only/share_double_head_transformer_ShareV_out_proj_FFN_lr0.1_from_epoch35'
+
+
+                # print(f'out_dir_ = {out_dir_}')
+                args_pretrained_model = proposal_parser.parse_args(
+                    args=
+                    [
+                        '-m', 'sgdt_dn_dab_detr',
+                        '--output_dir', f'{out_dir_}',
+                        '--coco_path', f'{os.path.join(LIB_ROOT_DIR, "coco")}',
+                        '--use_dn',
+                        '--encoder_layer_config', 'regular_4-DualAttnShareVOutProjFFN_1',
+                        '--pretrain_model_path', f'{os.path.join(out_dir_, "checkpoint_transfer_weight.pth")}',  # TODO:
+                        '--token_scoring_discard_split_criterion', 'gt_only_exp-no_bg_token_remove',
+                        '--token_scoring_loss_criterion', 'gt_fg_scale_fake',
+                        '--token_scoring_gt_criterion', 'significance_value',
+                        '--pad_fg_pixel', '0',
+                        '--transformer_type', 'share_double_head_transformer',
+                        '--decoder_layer_config', 'regular_4',  # TODO: Adapt this based on different experiments
+                        '--token_masking', 'sMLP',
+                        '--token_masking_loc', 'K',
+                        '--is_teacher_model',
+                    ]
+                )
 
         elif args.with_teacher_model == 'teacher_model_use_pretrained_attn_learning_model':
             """

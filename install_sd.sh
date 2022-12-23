@@ -34,8 +34,11 @@ install_detr() {
 install_other() {
 	pip install wandb
 	pip install opencv-python-headless==4.5.2.52
-	
-	
+	pip install timm
+	pip install seaborn
+	echo "export PYTHONPATH=${PYTHONPATH}:/hy-tmp/SDDETR/DN-DETR/" >> ~/.bashrc
+	source ~/.bashrc
+
 	
 
 	touch ~/.tmux.conf
