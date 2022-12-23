@@ -936,6 +936,7 @@ class TransformerEncoder(nn.Module):
                 sgdt=None,
                 teacher_encoder_output_list=None
                 ):
+
         # process all encoder layers, so encoder_layer_ids=None
         output, sgdt_output_list, pos, src_key_padding_mask, encoder_output_list = self.forward_subset_encoder_layers(
             src=src, mask=mask, src_key_padding_mask=src_key_padding_mask, pos=pos, sgdt=sgdt,
@@ -3702,10 +3703,18 @@ class Transformer(nn.Module):
 
         # mask is used as src_key_padding_mask not mask even encoder has 'mask' input.
         skip_teacher_model_decoder_forward = kwargs.pop('skip_teacher_model_decoder_forward', False)
+        # {'teacher_encoder_decoder_out_dict': None}
 
+        teacher_encoder_decoder_out_dict = kwargs.pop('teacher_encoder_decoder_out_dict', None)
+        teacher_encoder_output_list = None
+        if teacher_encoder_decoder_out_dict is not None and \
+                'teacher_encoder_output_list' in kwargs['teacher_encoder_decoder_out_dict']:
+            teacher_encoder_output_list = kwargs['teacher_encoder_decoder_out_dict']['teacher_encoder_output_list']
+
+        # Encoder needs teacher_encoder_output_list not teacher_encoder_decoder_out_dict
         memory, sgdt_output_list, pos_embed, mask, encoder_output_list = self.encoder(
             src, src_key_padding_mask=mask, pos=pos_embed,
-            sgdt=sgdt, **kwargs,
+            sgdt=sgdt, teacher_encoder_output_list=teacher_encoder_output_list,  **kwargs,
         )
 
         # If this model is used as teacher, sometimes we do not need to go through decoder.
@@ -3742,7 +3751,7 @@ class Transformer(nn.Module):
             hs, references = self.decoder(
                 tgt, memory, tgt_mask=attn_mask, memory_key_padding_mask=mask,
                 pos=pos_embed, refpoints_unsigmoid=refpoint_embed,
-                sgdt=sgdt, return_decoder_out=True,
+                sgdt=sgdt, return_decoder_out=False,
             )
             encoder_decoder_out_dict = dict(
                 encoder_output_list=encoder_output_list,
