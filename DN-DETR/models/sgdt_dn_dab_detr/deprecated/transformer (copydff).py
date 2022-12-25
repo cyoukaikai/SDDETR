@@ -178,8 +178,6 @@ def get_self_attn_q_k_v(src,
         elif token_masking_loc == 'Q':
             q = with_pos_embed(src_with_gt, pos)
             k = with_pos_embed(src, pos)
-            # here it is save to use v = src, as the src here will not affect the src passed in
-            # (outside of this function)
             v = src
         elif token_masking_loc == 'K':
             q = with_pos_embed(src, pos)
@@ -201,7 +199,7 @@ def get_self_attn_q_k_v(src,
         # no update (probably due to token_masking or token_masking_loc not set, or token_masking_loc in
         # '[MHA_Out', 'FFN_Out'])
         q = k = with_pos_embed(src, pos)
-        v = src  # TODO: to avoid a computer graph from v to q, k, no, as they are only used inside a single self-attn
+        v = src
     return q, k, v
 
 
@@ -386,13 +384,12 @@ class TransformerEncoderDualAttnLayerShareVOutProjFFN(TransformerEncoderLayer):
                      ):
         # student
         q = k = with_pos_embed(src, pos)
-        # v = src  # This is a big bug as the two self-attn will interact with each other when src is again passed  to
-        # the teacher branch. src -> v -> (q_teacher, k_teacher, v_teacher)
+        v = src
         q_teacher, k_teacher, v_teacher = get_self_attn_q_k_v(
             src=src, pos=pos, src_key_padding_mask=src_key_padding_mask, sgdt=sgdt, )
 
         src2_s_t_tuple, _, attn_output_weight_logits_s_t_tuple = self.self_attn(
-            q, k, value=src,  # never use value = v and v = src.
+            q, k, value=v,
             query_teacher=q_teacher,
             key_teacher=k_teacher,
             value_teacher=v_teacher,
@@ -577,12 +574,12 @@ class TransformerEncoderTripleAttnLayerShareOutProjFFN(TransformerEncoderLayer):
                      ):
         # student
         q = k = with_pos_embed(src, pos)
-        # v = src
+        v = src
         q_teacher, k_teacher, v_teacher = get_self_attn_q_k_v(
             src=src, pos=pos, src_key_padding_mask=src_key_padding_mask, sgdt=sgdt, )
 
         src2_s_t_tuple, _, attn_output_weight_logits_s_t_tuple = self.self_attn(
-            q, k, value=src,
+            q, k, value=v,
             query_teacher=q_teacher,
             key_teacher=k_teacher,
             value_teacher=v_teacher,
@@ -939,7 +936,6 @@ class TransformerEncoder(nn.Module):
                 sgdt=None,
                 teacher_encoder_output_list=None
                 ):
-
         # process all encoder layers, so encoder_layer_ids=None
         output, sgdt_output_list, pos, src_key_padding_mask, encoder_output_list = self.forward_subset_encoder_layers(
             src=src, mask=mask, src_key_padding_mask=src_key_padding_mask, pos=pos, sgdt=sgdt,
@@ -3706,18 +3702,10 @@ class Transformer(nn.Module):
 
         # mask is used as src_key_padding_mask not mask even encoder has 'mask' input.
         skip_teacher_model_decoder_forward = kwargs.pop('skip_teacher_model_decoder_forward', False)
-        # {'teacher_encoder_decoder_out_dict': None}
 
-        teacher_encoder_decoder_out_dict = kwargs.pop('teacher_encoder_decoder_out_dict', None)
-        teacher_encoder_output_list = None
-        if teacher_encoder_decoder_out_dict is not None and \
-                'teacher_encoder_output_list' in kwargs['teacher_encoder_decoder_out_dict']:
-            teacher_encoder_output_list = kwargs['teacher_encoder_decoder_out_dict']['teacher_encoder_output_list']
-
-        # Encoder needs teacher_encoder_output_list not teacher_encoder_decoder_out_dict
         memory, sgdt_output_list, pos_embed, mask, encoder_output_list = self.encoder(
             src, src_key_padding_mask=mask, pos=pos_embed,
-            sgdt=sgdt, teacher_encoder_output_list=teacher_encoder_output_list,  **kwargs,
+            sgdt=sgdt, **kwargs,
         )
 
         # If this model is used as teacher, sometimes we do not need to go through decoder.
@@ -3754,7 +3742,7 @@ class Transformer(nn.Module):
             hs, references = self.decoder(
                 tgt, memory, tgt_mask=attn_mask, memory_key_padding_mask=mask,
                 pos=pos_embed, refpoints_unsigmoid=refpoint_embed,
-                sgdt=sgdt, return_decoder_out=False,
+                sgdt=sgdt, return_decoder_out=True,
             )
             encoder_decoder_out_dict = dict(
                 encoder_output_list=encoder_output_list,

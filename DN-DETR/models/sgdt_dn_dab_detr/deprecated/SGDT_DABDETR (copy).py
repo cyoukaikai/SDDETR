@@ -349,7 +349,7 @@ class SetCriterion(SetCriterionOld):
         return losses
 
     def decoder_distill_loss_boxes(self, outputs, targets,
-                                   cal_loss_only_on_positive_box=False,
+                                   cal_loss_only_on_positive_box=True,
                                    # indices, num_boxes
                                    ):
         """Compute the losses related to the bounding boxes, the L1 regression loss and the GIoU loss
