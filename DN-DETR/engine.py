@@ -38,9 +38,6 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
     except:
         need_tgt_for_training = False
 
-    if teacher_model is not None:
-        teacher_model.train()  # param.requires_grad = False for all parameters even in train mode
-
     model.train()
     criterion.train()
     metric_logger = utils.MetricLogger(delimiter="  ")
@@ -122,16 +119,12 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
                         **teacher_model_kwargs,
                     )
                 else:
-                    teacher_outputs = teacher_model(samples)
+                    teacher_outputs = model(samples)
 
             # update the input variable
-            # teacher_encoder_output_list = teacher_outputs['encoder_output_list']
-            # model_kwargs['teacher_encoder_output_list'] = teacher_encoder_output_list
-            model_kwargs['teacher_encoder_decoder_out_dict'] = teacher_outputs['encoder_decoder_out_dict']
+            teacher_encoder_output_list = teacher_outputs['encoder_output_list']
+            model_kwargs['teacher_encoder_output_list'] = teacher_encoder_output_list
             # print(f'teacher_encoder_output_list={teacher_encoder_output_list}')
-
-        if args.modelname.lower().startswith('dn_'):
-            model_kwargs = dict()
 
         if not args.token_classifier:  # Normal detection
             with torch.cuda.amp.autocast(enabled=args.amp):
@@ -149,9 +142,7 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
 
         else:
             with torch.cuda.amp.autocast(enabled=args.amp):
-                outputs = model(  # TODO: to update the code here
-                    teacher_encoder_output_list=model_kwargs['teacher_encoder_output_list']
-                )
+                outputs = model(teacher_encoder_output_list=model_kwargs['teacher_encoder_output_list'])
                 loss_dict = criterion(outputs, sgdt=teacher_outputs['sgdt'])
 
                 # loss_dict = criterion(outputs, targets,
@@ -233,9 +224,6 @@ def evaluate(model, criterion, postprocessors, data_loader, base_ds, device, out
 
     model.eval()
     criterion.eval()
-
-    if teacher_model is not None:
-        teacher_model.eval()
 
     proposal_processor = init_proposal_processor(args.proposal_scoring)
 
@@ -359,16 +347,12 @@ def evaluate(model, criterion, postprocessors, data_loader, base_ds, device, out
                         **teacher_model_kwargs,
                     )
                 else:
-                    teacher_outputs = teacher_model(samples)
+                    teacher_outputs = model(samples)
 
             # update the input variable
-            # teacher_encoder_output_list = teacher_outputs['encoder_output_list']
-            # model_kwargs['teacher_encoder_output_list'] = teacher_encoder_output_list
-            model_kwargs['teacher_encoder_decoder_out_dict'] = teacher_outputs['encoder_decoder_out_dict']
+            teacher_encoder_output_list = teacher_outputs['encoder_output_list']
+            model_kwargs['teacher_encoder_output_list'] = teacher_encoder_output_list
             # print(f'teacher_encoder_output_list={teacher_encoder_output_list}')
-
-        if args.modelname.lower().startswith('dn_'):
-            model_kwargs = dict()
 
         if not args.token_classifier:
             with torch.cuda.amp.autocast(enabled=args.amp):
@@ -436,7 +420,7 @@ def evaluate(model, criterion, postprocessors, data_loader, base_ds, device, out
                 # )
         # for the final process, it is 'orig_size' as the original code.
         if eval_decoder_layer is not None and eval_decoder_layer != -1 and \
-                eval_decoder_layer != len(outputs['aux_outputs']):  #
+                eval_decoder_layer != len(outputs['aux_outputs']) + 1:  #
             assert isinstance(eval_decoder_layer, int) and eval_decoder_layer < len(outputs['aux_outputs'])
             # change the evaluation layer of the decoder
             # out = {'pred_logits': outputs_class[-1], 'pred_boxes': outputs_coord[-1]}

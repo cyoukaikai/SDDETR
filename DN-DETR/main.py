@@ -20,9 +20,9 @@ import datasets
 import util.misc as utils
 from datasets import build_dataset, get_coco_api_from_dataset
 from engine import evaluate, train_one_epoch
-from models import build_DABDETR, build_SGDT_DABDETR, build_token_classifier
-# build_dab_deformable_detr, \
-#     build_dab_deformable_detr_deformable_encoder_only,
+from models import build_DABDETR, build_SGDT_DABDETR  #,\
+    # build_dab_deformable_detr, \
+    # build_dab_deformable_detr_deformable_encoder_only,  build_token_classifier
 
 from util.utils import clean_state_dict
 
@@ -234,49 +234,31 @@ def get_args_parser():
     parser.add_argument('--freeze_detr_decoder', action='store_true')
     parser.add_argument('--skip_teacher_model_decoder_forward', action='store_true')
     parser.add_argument('--training_skip_forward_decoder', action='store_true')
-
-    parser.add_argument('--transfer_weight', action='store_true')
-    # parser.add_argument('--encoder_layer_id_to_transfer_weight', default=5, type=int)  # 500
-    parser.add_argument('--no_train_eval', action='store_true')
-    parser.add_argument('--save_transfered_weight', action='store_true')
-
-    parser.add_argument('--with_teacher_model', type=str, default='',
-                        choices=
-                        ['teacher_model_use_pretrained_sgdt_V_marked',
-                         'teacher_model_use_pretrained_detr44AP',
-                         'teacher_model_use_pretrained_v_shared_double_attn52_2ap',
-                         'teacher_model_use_pretrained_v_shared_double_attn52_6ap_lr1_not_converged',
-                         'teacher_model_use_pretrained_v_shared_double_attn52_6ap',
-                         'teacher_model_use_pretrained_attn_learning_model',
-                         'share_double_head_transformer_ShareV_out_proj_FFN_E6D6',
-                         ])
-    parser.add_argument('--with_teacher_model_for_feature_attn_sharing', action='store_true')
-    parser.add_argument('--is_teacher_model', action='store_true')
-
+    parser.add_argument('--with_teacher_model', action='store_true', help="")
+    parser.add_argument('--teacher_model_use_pretrained_sgdt_V_marked', action='store_true')
+    parser.add_argument('--teacher_model_use_pretrained_detr44AP', action='store_true')
+    parser.add_argument('--teacher_model_use_pretrained_v_shared_double_attn52_2ap', action='store_true')
+    parser.add_argument('--teacher_model_use_pretrained_v_shared_double_attn52_6ap_lr1_not_converged', action='store_true')
+    parser.add_argument('--teacher_model_use_pretrained_v_shared_double_attn52_6ap', action='store_true')
+    parser.add_argument('--teacher_model_use_pretrained_attn_learning_model', action='store_true')
     parser.add_argument('--auxiliary_fg_bg_cls_encoder_layer_ids', nargs="+", type=int)
-    #  --auxiliary_fg_bg_cls_encoder_layer_ids 0 1 2 3 4 5 \
-    parser.add_argument('--decoder_ca_attn_distill', default=None, type=str, )  # first_decoder_ca,
-    parser.add_argument('--decoder_prediction_distill', default=None,
-                        type=str, )  # from_second_decoder, only_last_decoder
+
+    parser.add_argument('--decoder_ca_attn_distill', default=None, type=str,)  # first_decoder_ca,
+    parser.add_argument('--decoder_prediction_distill', default=None, type=str, )  # from_second_decoder, only_last_decoder
 
     parser.add_argument('--feature_attn_distillation', default=None, type=str,
                         help="Conduct feature_attn_distillation")  # cascade parallel separate_trained_model
     parser.add_argument('--feature_distillation_teacher_feat_with_grad', action='store_true')
+    parser.add_argument('--sgdt_transformer', action='store_true',
+                        help="Using the transformer that the last encoder layer accept input from decoder output")
+    parser.add_argument('--dual_attn_transformer', action='store_true')
 
-    parser.add_argument('--transformer_type', type=str, default='',
-                        choices=[
-                            'prediction_distill_transformer',
-                            'dual_attn_transformer',
-                            'double_head_transformer',
-                            'share_double_head_transformer',
-                            'share_triple_head_transformer',
-                            'online_decoder_self_distill_transformer',
-                            'online_self_distill_transformer',
-                            'sgdt_transformer',
-                            # "Using the transformer that the last encoder layer accept input from decoder output"
-                        ])
+    parser.add_argument('--online_self_distill_transformer', action='store_true',)
+    parser.add_argument('--online_decoder_self_distill_transformer', action='store_true',)
+    parser.add_argument('--double_head_transformer', action='store_true',)
+    parser.add_argument('--share_double_head_transformer', action='store_true',)
+    parser.add_argument('--share_decoder_ca_attn_map', action='store_true',)
 
-    parser.add_argument('--share_decoder_ca_attn_map', action='store_true', )
     parser.add_argument('--save_coco_evaluator_prefix', default=None, type=str,
                         help="For eval only. Save the outputs for all images.")
     parser.add_argument('--train_token_scoring_only', action='store_true',
@@ -289,12 +271,6 @@ def get_args_parser():
     # parser.add_argument('--marking_encoder_feature_by_fg1_bg0', action='store_true')  # deprecate in future
     parser.add_argument('--marking_encoder_layer_fg1_bg0', type=str, default='',
                         choices=['K', 'Q', 'V', 'FFN_Out', ])
-
-    parser.add_argument('--token_masking', type=str, default='',
-                        choices=['sMLP', 'MarkFg1Bg0', ])
-    parser.add_argument('--token_masking_loc', type=str, default='',
-                        choices=['X', 'Q', 'K', 'V', 'QK', 'KV', 'MHA_out', 'MHA_feature', 'FFN_out', 'FFN_feature', ])
-
     parser.add_argument('--token_classifier', action='store_true')
     # parser.add_argument('--token_classifier', type=str, default='',
     #                     choices=['Pretrained_MLP_Fg_KV_to_MLP_Classifier'])
@@ -305,12 +281,12 @@ def get_args_parser():
     parser.add_argument('--eval_training_data', action='store_true')
     parser.add_argument('--wandb', action='store_true')
 
-    parser.add_argument('--with_pred_distill_decoder_layer_ids', nargs="+", type=int)
+    parser.add_argument('--with_decoder_prediction_distillation', action='store_true')
     parser.add_argument('--decoder_prediction_distillation_config', default=None, type=str, required=False,
                         # choices=['last_layer', ]
                         )
-    parser.add_argument('--sgdt_decoder_pred_cls_distill_loss_loss_coef', default=20.0, type=float, )
-    parser.add_argument('--sgdt_decoder_pred_loc_distill_loss_loss_coef', default=10.0, type=float, )
+    parser.add_argument('--sgdt_decoder_pred_cls_loss_coef', default=2.0, type=float,)
+    parser.add_argument('--sgdt_decoder_pred_loc_loss_coef', default=5.0, type=float,)
     parser.add_argument('--with_sgdt_attention_loss', action='store_true')
 
     parser.add_argument('--sgdt_attention_loss_coef', default=5.0, type=float,
@@ -325,7 +301,9 @@ def get_args_parser():
     parser.add_argument('--attn_distillation_teacher_with_grad', action='store_true')
     parser.add_argument('--teacher_layer_back_propagate_to_input', action='store_true')
 
-    parser.add_argument('--debug_st_attn_sweep_n_attn_heads', type=int, default=0, )
+
+
+    parser.add_argument('--debug_st_attn_sweep_n_attn_heads', type=int, default=0,)
     parser.add_argument('--debug_st_attn_sweep_fg_attn', action='store_true')
     parser.add_argument('--debug_st_attn_sweep_bg_attn', action='store_true')
 
@@ -342,7 +320,7 @@ def get_args_parser():
     parser.add_argument('--disable_fg_scale_supervision', action='store_true')
     parser.add_argument('--encoder_without_pos', action='store_true')
     parser.add_argument('--pad_fg_pixel', type=int, default=0, help='The number of pixels in input image to extend'
-                                                                    'from box boundary as gt regions.')
+                                                                     'from box boundary as gt regions.')
     parser.add_argument('--encoder_layer_config', default='regular_6', required=False,
                         )  # 'regular_6',  'regular_4-sgdtv1_1-sgdt_1', '' for TransformerEmptyEncoder
     parser.add_argument('--decoder_layer_config', default='regular_6', required=False,
@@ -386,8 +364,8 @@ def build_model_main(args):
     #     model, criterion, postprocessors = build_dab_deformable_detr_deformable_encoder_only(args)
     elif args.modelname.lower() == 'sgdt_dn_dab_detr':
         model, criterion, postprocessors = build_SGDT_DABDETR(args)
-    elif args.modelname.lower() == 'sgdt_token_fg_bg_classifier':
-        model, criterion, postprocessors = build_token_classifier(args)
+    # elif args.modelname.lower() == 'sgdt_token_fg_bg_classifier':
+    #     model, criterion, postprocessors = build_token_classifier(args)
     else:
         raise NotImplementedError
 
@@ -580,7 +558,7 @@ def main(args):
           "module.transformer.encoder.layers.5.self_attn.out_proj.weight": 65536,
           "module.transformer.encoder.layers.5.self_attn.out_proj.bias": 256,
         """
-        # current setting regular_4-DualAttnShareVOutProjFFN_1
+        # current setting regular_4-parallelSTECSGDTShareVOutProjFFN_1
         freeze_weight_ignore_keywords = ['transformer.encoder.layers.4.self_attn.in_proj']
 
     elif args.training_only_distill_student_attn_not_free_backbone:
@@ -832,155 +810,6 @@ def main(args):
             # model_without_ddp.transformer.encoder.layers[5].self_attn.in_proj_weight.data =
             # checkpoint['transformer.encoder.layers.5.self_attn.in_proj_weight'].chunk(3)
 
-        if args.transfer_weight:
-            num_layers = 6
-            for layer_id in range(num_layers):  # TODO: change 5 to the number of encoder layer
-                # layer_id = 4
-                if layer_id < num_layers - 1:
-                    device = model_without_ddp.transformer.encoder.layers[layer_id].linear1.weight.device
-                    w_q, w_k, w_v = checkpoint[
-                        f'transformer.encoder.layers.{layer_id}.self_attn.in_proj_weight'].to(device).chunk(3)
-                    b_q, b_k, b_v = checkpoint[
-                        f'transformer.encoder.layers.{layer_id}.self_attn.in_proj_bias'].to(device).chunk(3)
-
-                    out_proj_weight = checkpoint[
-                        f'transformer.encoder.layers.{layer_id}.self_attn.out_proj.weight'].to(device)
-                    out_proj_bias = checkpoint[
-                        f'transformer.encoder.layers.{layer_id}.self_attn.out_proj.bias'].to(device)
-
-                    # # original initialized weights
-                    # w_q_o, w_k_o, w_v_o = model_without_ddp.transformer.encoder.layers[layer_id].self_attn.in_proj_weight.data.chunk(3)
-                    # b_q_o, b_k_o, b_v_o = model_without_ddp.transformer.encoder.layers[layer_id].self_attn.in_proj_bias.data.chunk(3)
-                    # student attention
-                    model_without_ddp.transformer.encoder.layers[layer_id].self_attn.q_proj_weight.data = w_q
-                    model_without_ddp.transformer.encoder.layers[layer_id].self_attn.k_proj_weight.data = w_k
-                    model_without_ddp.transformer.encoder.layers[layer_id].self_attn.v_proj_weight.data = w_v
-                    model_without_ddp.transformer.encoder.layers[layer_id].self_attn.q_in_proj_bias.data = b_q
-                    model_without_ddp.transformer.encoder.layers[layer_id].self_attn.k_in_proj_bias.data = b_k
-                    model_without_ddp.transformer.encoder.layers[layer_id].self_attn.v_in_proj_bias.data = b_v
-                    model_without_ddp.transformer.encoder.layers[
-                        layer_id].self_attn.out_proj.weight.data = out_proj_weight
-                    model_without_ddp.transformer.encoder.layers[
-                        layer_id].self_attn.out_proj.weight.bias = out_proj_bias
-
-                else:
-
-                    device = model_without_ddp.transformer.encoder.layers[layer_id].linear1.weight.device
-                    w_q, w_k, w_v, w_q_teacher, w_k_teacher = checkpoint[
-                        f'transformer.encoder.layers.{layer_id}.self_attn.in_proj_weight'].to(device).chunk(5)
-                    b_q, b_k, b_v, b_q_teacher, b_k_teacher = checkpoint[
-                        f'transformer.encoder.layers.{layer_id}.self_attn.in_proj_bias'].to(device).chunk(5)
-
-                    # # Same name in the source and target, so no need special handling.
-                    # out_proj_weight = checkpoint[
-                    #     f'transformer.encoder.layers.{layer_id}.self_attn.out_proj.weight'].to(device)
-                    # out_proj_bias = checkpoint[
-                    #     f'transformer.encoder.layers.{layer_id}.self_attn.out_proj.bias'].to(device)
-
-                    if f'transformer.encoder.layers.{layer_id}.self_attn.out_proj_teacher.weight' in checkpoint:
-                        out_proj_teacher_weight = checkpoint[
-                            f'transformer.encoder.layers.{layer_id}.self_attn.out_proj_teacher.weight'].to(device)
-                        out_proj_teacher_bias = checkpoint[
-                            f'transformer.encoder.layers.{layer_id}.self_attn.out_proj_teacher.bias'].to(device)
-
-                        model_without_ddp.transformer.encoder.layers[
-                            layer_id].self_attn.teacher_branch.out_proj.weight.data = out_proj_teacher_weight
-                        model_without_ddp.transformer.encoder.layers[
-                            layer_id].self_attn.teacher_branch.out_proj.bias.data = out_proj_teacher_bias
-
-                    # # original initialized weights
-                    # w_q_o, w_k_o, w_v_o = model_without_ddp.transformer.encoder.layers[layer_id].self_attn.in_proj_weight.data.chunk(3)
-                    # b_q_o, b_k_o, b_v_o = model_without_ddp.transformer.encoder.layers[layer_id].self_attn.in_proj_bias.data.chunk(3)
-                    # student attention
-                    model_without_ddp.transformer.encoder.layers[layer_id].self_attn.q_proj_weight.data = w_q
-                    model_without_ddp.transformer.encoder.layers[layer_id].self_attn.k_proj_weight.data = w_k
-                    model_without_ddp.transformer.encoder.layers[layer_id].self_attn.v_proj_weight.data = w_v
-                    model_without_ddp.transformer.encoder.layers[layer_id].self_attn.q_in_proj_bias.data = b_q
-                    model_without_ddp.transformer.encoder.layers[layer_id].self_attn.k_in_proj_bias.data = b_k
-                    model_without_ddp.transformer.encoder.layers[layer_id].self_attn.v_in_proj_bias.data = b_v
-                    # model_without_ddp.transformer.encoder.layers[layer_id].self_attn.out_proj.weight.data = out_proj_weight
-                    # model_without_ddp.transformer.encoder.layers[layer_id].self_attn.out_proj.bias.data = out_proj_bias
-
-                    # teacher attention
-                    model_without_ddp.transformer.encoder.layers[
-                        layer_id].self_attn.teacher_branch.q_proj_weight.data = w_q_teacher
-                    model_without_ddp.transformer.encoder.layers[
-                        layer_id].self_attn.teacher_branch.k_proj_weight.data = w_k_teacher
-                    # model_without_ddp.transformer.encoder.layers[layer_id].self_attn.teacher_branch.v_proj_weight.data = w_v
-                    model_without_ddp.transformer.encoder.layers[
-                        layer_id].self_attn.teacher_branch.q_in_proj_bias.data = b_q_teacher
-                    model_without_ddp.transformer.encoder.layers[
-                        layer_id].self_attn.teacher_branch.k_in_proj_bias.data = b_k_teacher
-                    # model_without_ddp.transformer.encoder.layers[layer_id].self_attn.teacher_branch.v_in_proj_bias.data = b_v
-
-                    if f'transformer.encoder.layers.{layer_id}.teacher_encoder_layer.linear1.weight' in checkpoint:
-                        # for names in ['linear1.weight', 'linear1.bias', 'linear2.weight', 'linear2.bias',
-                        #               'norm1.weight', 'norm1.bias', 'norm2.weight', 'norm2.bias', 'activation.weight']:
-
-                        model_without_ddp.transformer.encoder.layers[layer_id].teacher_ffn. \
-                            linear1.weight.data = checkpoint[f'transformer.encoder.layers.{layer_id}.' \
-                                                             f'teacher_encoder_layer.linear1.weight'].to(device)
-                        model_without_ddp.transformer.encoder.layers[layer_id].teacher_ffn. \
-                            linear1.bias.data = checkpoint[f'transformer.encoder.layers.{layer_id}.' \
-                                                           f'teacher_encoder_layer.linear1.bias'].to(device)
-
-                        model_without_ddp.transformer.encoder.layers[layer_id].teacher_ffn. \
-                            linear2.weight.data = checkpoint[f'transformer.encoder.layers.{layer_id}.' \
-                                                             f'teacher_encoder_layer.linear2.weight'].to(device)
-                        model_without_ddp.transformer.encoder.layers[layer_id].teacher_ffn. \
-                            linear2.bias.data = checkpoint[f'transformer.encoder.layers.{layer_id}.' \
-                                                           f'teacher_encoder_layer.linear2.bias'].to(device)
-
-                        model_without_ddp.transformer.encoder.layers[layer_id].teacher_ffn. \
-                            norm1.weight.data = checkpoint[f'transformer.encoder.layers.{layer_id}.' \
-                                                           f'teacher_encoder_layer.norm1.weight'].to(device)
-                        model_without_ddp.transformer.encoder.layers[layer_id].teacher_ffn. \
-                            norm1.bias.data = checkpoint[f'transformer.encoder.layers.{layer_id}.' \
-                                                         f'teacher_encoder_layer.norm1.bias'].to(device)
-
-                        model_without_ddp.transformer.encoder.layers[layer_id].teacher_ffn. \
-                            norm2.weight.data = checkpoint[f'transformer.encoder.layers.{layer_id}.' \
-                                                           f'teacher_encoder_layer.norm2.weight'].to(device)
-                        model_without_ddp.transformer.encoder.layers[layer_id].teacher_ffn. \
-                            norm2.bias.data = checkpoint[f'transformer.encoder.layers.{layer_id}.' \
-                                                         f'teacher_encoder_layer.norm2.bias'].to(device)
-
-                        model_without_ddp.transformer.encoder.layers[layer_id].teacher_ffn. \
-                            activation.weight.data = checkpoint[f'transformer.encoder.layers.{layer_id}.' \
-                                                                f'teacher_encoder_layer.activation.weight'].to(device)
-                    """
-
-                      "module.transformer.encoder.layers.4.teacher_encoder_layer.linear1.weight": 524288,
-                      "module.transformer.encoder.layers.4.teacher_encoder_layer.linear1.bias": 2048,
-                      "module.transformer.encoder.layers.4.teacher_encoder_layer.linear2.weight": 524288,
-                      "module.transformer.encoder.layers.4.teacher_encoder_layer.linear2.bias": 256,
-                      "module.transformer.encoder.layers.4.teacher_encoder_layer.norm1.weight": 256,
-                      "module.transformer.encoder.layers.4.teacher_encoder_layer.norm1.bias": 256,
-                      "module.transformer.encoder.layers.4.teacher_encoder_layer.norm2.weight": 256,
-                      "module.transformer.encoder.layers.4.teacher_encoder_layer.norm2.bias": 256,
-                      "module.transformer.encoder.layers.4.teacher_encoder_layer.activation.weight": 1,
-
-                    'transformer.encoder.layers.4.self_attn.teacher_branch.q_proj_weight', 
-                    'transformer.encoder.layers.4.self_attn.teacher_branch.k_proj_weight',
-                     'transformer.encoder.layers.4.self_attn.teacher_branch.q_in_proj_bias', 
-                     'transformer.encoder.layers.4.self_attn.teacher_branch.k_in_proj_bias
-                    """
-            # if args.save_transfered_weight:
-            #     checkpoint_paths = [args.pretrain_model_path.replace('.pth', '') + f'_transfer_weight.pth']
-            #     # # extra checkpoint before LR drop and every 100 epochs
-            #     # if (epoch + 1) % args.lr_drop == 0 or (epoch + 1) % args.save_checkpoint_interval == 0:
-            #     #     checkpoint_paths.append(output_dir / f'checkpoint{epoch:04}.pth')
-            #     for checkpoint_path in checkpoint_paths:
-            #         utils.save_on_master({
-            #             'model': model_without_ddp.state_dict(),
-            #             # 'optimizer': optimizer.state_dict(),
-            #             # 'lr_scheduler': lr_scheduler.state_dict(),
-            #             # 'epoch': epoch,
-            #             'args': args,
-            #         }, checkpoint_path)
-            # if args.no_train_eval:
-            #     sys.exit(0)
-
         logger.info(str(_load_output))
         # import ipdb; ipdb.set_trace()
 
@@ -1035,7 +864,7 @@ def main(args):
         print('Loading trained model done.')
         for param in model_.parameters():
             param.requires_grad = False
-        # model_.eval()  # Do not set the mode to eval() as we need use_dn for distillation.
+        model_.eval()
         return model_
 
     def get_trained_models():
@@ -1054,7 +883,39 @@ def main(args):
         return load_pretrain_model_(args_pretrained_model)
 
     def get_distillation_pretrained_models():
+        """
+            pad_fg_pixel=0
+            token_scoring_loss_criterion=gt_fg_scale_fake
+            token_scoring_gt_criterion=significance_value
+            token_scoring_discard_split_criterion=gt_only_exp-no_bg_token_remove
+            out_dir=regular_5-sgdtv1_1
+            exp_str=feature-distillation-new-split1c_version-gt_split_only-aligh-sgdtv1_1
+            #===========================
 
+            python -m torch.distributed.launch --nproc_per_node=2 --master_port=$master_port \
+            main.py -m sgdt_dn_dab_detr \
+              --output_dir logs/$out_dir/$exp_str \
+              --exp_str  $exp_str \
+              --batch_size 2 \
+              --epochs 12 \
+              --lr_drop 11 \
+              --coco_path coco \
+              --use_dn \
+              --lr 5e-5 \
+              --lr_backbone 5e-6 \
+              --encoder_layer_config regular_5-sgdtv1_1 \
+              --token_scoring_discard_split_criterion  $token_scoring_discard_split_criterion  \
+              --token_scoring_loss_criterion $token_scoring_loss_criterion  \
+              --token_scoring_gt_criterion $token_scoring_gt_criterion \
+              --pad_fg_pixel $pad_fg_pixel \
+              --align_encoder_decoder_layers_num 1 \
+              --auto_resume \
+              --feature_attn_distillation \
+              --save_checkpoint_interval 1 \
+              --wandb
+        Returns:
+
+        """
         proposal_parser = argparse.ArgumentParser('', parents=[get_args_parser()])
         # out_dir_ = 'logs/regular_5-sgdtv1_1/token_num_no_limit-aligh-sgdtv1_1-debug_split_1c'
         # args_pretrained_model = proposal_parser.parse_args(
@@ -1074,7 +935,7 @@ def main(args):
         #         '--align_encoder_decoder_layers_num', '1',
         #     ]
         # )
-        if args.with_teacher_model == 'teacher_model_use_pretrained_sgdt_V_marked':
+        if args.teacher_model_use_pretrained_sgdt_V_marked:
             out_dir_ = 'logs/e6-d6-gt_split_only/e6-d6-V-gt_split_only-regular_5-sgdt+v_1'
             args_pretrained_model = proposal_parser.parse_args(
                 args=
@@ -1090,12 +951,11 @@ def main(args):
                     '--token_scoring_loss_criterion', 'gt_fg_scale_fake',
                     '--token_scoring_gt_criterion', 'significance_value',
                     '--pad_fg_pixel', '0',
-
                     # '--align_encoder_decoder_layers_num', '1',
                 ]
             )
 
-        elif args.with_teacher_model == 'teacher_model_use_pretrained_detr44AP':
+        elif args.teacher_model_use_pretrained_detr44AP:
             out_dir_ = 'logs'
             args_pretrained_model = proposal_parser.parse_args(
                 args=
@@ -1110,143 +970,74 @@ def main(args):
                     '--resume', f'{os.path.join(LIB_ROOT_DIR, "logs/checkpoint_optimized_44.7ap.pth")}',
                 ]
             )
-        elif args.with_teacher_model in [
-            'teacher_model_use_pretrained_v_shared_double_attn52_2ap',
-             'teacher_model_use_pretrained_v_shared_double_attn52_6ap',
-             'teacher_model_use_pretrained_v_shared_double_attn52_6ap_lr1_not_converged',
-            'share_double_head_transformer_ShareV_out_proj_FFN_E6D6',
-
-        ]:
-            """
-            # to start from epoch 10
-            pad_fg_pixel=0
-            token_scoring_loss_criterion=gt_fg_scale_fake
-            token_scoring_gt_criterion=significance_value
-            token_scoring_discard_split_criterion=gt_only_exp-no_bg_token_remove
-            out_dir=e6-d6-gt_split_only
-            encoder_layer_config=regular_4-DualAttnShareVOutProjFFN_1  
-            exp_str=share_double_head_transformer_ShareV_out_proj_FFN
-            #===========================
-
-            python -m torch.distributed.launch --nproc_per_node=2 --master_port=$master_port \
-            main.py -m sgdt_dn_dab_detr \
-              --output_dir logs/$out_dir/$exp_str \
-              --exp_str  $exp_str \
-              --batch_size 2 \
-              --epochs 50 \
-              --lr_drop 40 \
-              --drop_lr_now \
-              --coco_path coco \
-              --use_dn \
-              --lr 5e-5 \
-              --lr_backbone 5e-6 \
-              --encoder_layer_config $encoder_layer_config \
-              --token_scoring_discard_split_criterion  $token_scoring_discard_split_criterion  \
-              --token_scoring_loss_criterion $token_scoring_loss_criterion  \
-              --token_scoring_gt_criterion $token_scoring_gt_criterion \
-              --pad_fg_pixel $pad_fg_pixel \
-              --share_double_head_transformer \
-              --eval_decoder_layer 3 \
-              --decoder_layer_config regular_4 \
-              --auto_resume \
-              --no_resume_optimizer_lr_schedule \
-              --save_checkpoint_interval 2 \
-              --wandb
+        elif args.teacher_model_use_pretrained_v_shared_double_attn52_2ap or \
+                args.teacher_model_use_pretrained_v_shared_double_attn52_6ap or \
+                args.teacher_model_use_pretrained_v_shared_double_attn52_6ap_lr1_not_converged:
             """
 
-            """
-            # ==================================
-            # to start from epoch 10
-            pad_fg_pixel=0
-            token_scoring_loss_criterion=gt_fg_scale_fake
-            token_scoring_gt_criterion=significance_value
-            token_scoring_discard_split_criterion=gt_only_exp-no_bg_token_remove
-            out_dir=e6-d6-gt_split_only
-            encoder_layer_config=regular_4-DualAttnShareVOutProjFFN_1  
-            exp_str=share_double_head_transformer_ShareV_out_proj_FFN
-            #===========================
-            
-            python -m torch.distributed.launch --nproc_per_node=1 --master_port=$master_port \
-            main.py -m sgdt_dn_dab_detr \
-              --output_dir logs/$out_dir/$exp_str \
-              --exp_str  $exp_str \
-              --batch_size 2 \
-              --epochs 50 \
-              --lr_drop 40 \
-              --coco_path coco \
-              --use_dn \
-              --lr 5e-5 \
-              --lr_backbone 5e-6 \
-              --encoder_layer_config $encoder_layer_config \
-              --token_scoring_discard_split_criterion  $token_scoring_discard_split_criterion  \
-              --token_scoring_loss_criterion $token_scoring_loss_criterion  \
-              --token_scoring_gt_criterion $token_scoring_gt_criterion \
-              --pad_fg_pixel $pad_fg_pixel \
-              --share_double_head_transformer \
-              --decoder_layer_config regular_4 \
-              --token_masking sMLP \
-            --token_masking_loc  K   \
-              --pretrain_model_path logs/$out_dir/$exp_str/checkpoint_transfer_weight.pth \
-              --eval_decoder_layer 3 \
-              --eval \
-              --debug 
-            """
+                    # to start from epoch 10
+                    pad_fg_pixel=0
+                    token_scoring_loss_criterion=gt_fg_scale_fake
+                    token_scoring_gt_criterion=significance_value
+                    token_scoring_discard_split_criterion=gt_only_exp-no_bg_token_remove
+                    out_dir=e6-d6-gt_split_only
+                    encoder_layer_config=regular_4-parallelSTECSGDTShareVOutProjFFN_1  
+                    exp_str=share_double_head_transformer_ShareV_out_proj_FFN
+                    #===========================
 
-            if args.with_teacher_model == 'share_double_head_transformer_ShareV_out_proj_FFN_E6D6':
-                # print(f'out_dir_ = {out_dir_}')
-                out_dir_ = 'logs/e6-d6-gt_split_only/share_double_head_transformer_ShareV_out_proj_FFN_E6D6'
-                args_pretrained_model = proposal_parser.parse_args(
-                    args=
-                    [
-                        '-m', 'sgdt_dn_dab_detr',
-                        '--output_dir', f'{out_dir_}',
-                        '--coco_path', f'{os.path.join(LIB_ROOT_DIR, "coco")}',
-                        '--use_dn',
-                        '--encoder_layer_config', 'regular_5-DualAttnShareVOutProjFFN_1', #  TODO: Adapt this
-                        '--pretrain_model_path', f'{os.path.join(out_dir_, "checkpoint_transfer_weight.pth")}',  # TODO:
-                        '--token_scoring_discard_split_criterion', 'gt_only_exp-no_bg_token_remove',
-                        '--token_scoring_loss_criterion', 'gt_fg_scale_fake',
-                        '--token_scoring_gt_criterion', 'significance_value',
-                        '--pad_fg_pixel', '0',
-                        '--transformer_type', 'share_double_head_transformer',
-                        '--decoder_layer_config', 'regular_6',  # TODO: Adapt this
-                        '--token_masking', 'sMLP',
-                        '--token_masking_loc', 'K',
-                        '--is_teacher_model',
-                    ]
-                )
+                    python -m torch.distributed.launch --nproc_per_node=2 --master_port=$master_port \
+                    main.py -m sgdt_dn_dab_detr \
+                      --output_dir logs/$out_dir/$exp_str \
+                      --exp_str  $exp_str \
+                      --batch_size 2 \
+                      --epochs 50 \
+                      --lr_drop 40 \
+                      --drop_lr_now \
+                      --coco_path coco \
+                      --use_dn \
+                      --lr 5e-5 \
+                      --lr_backbone 5e-6 \
+                      --encoder_layer_config $encoder_layer_config \
+                      --token_scoring_discard_split_criterion  $token_scoring_discard_split_criterion  \
+                      --token_scoring_loss_criterion $token_scoring_loss_criterion  \
+                      --token_scoring_gt_criterion $token_scoring_gt_criterion \
+                      --pad_fg_pixel $pad_fg_pixel \
+                      --share_double_head_transformer \
+                      --eval_decoder_layer 3 \
+                      --decoder_layer_config regular_4 \
+                      --auto_resume \
+                      --no_resume_optimizer_lr_schedule \
+                      --save_checkpoint_interval 2 \
+                      --wandb
+                    """
+            if args.teacher_model_use_pretrained_v_shared_double_attn52_6ap:
+                out_dir_ = 'logs/e6-d6-gt_split_only/share_double_head_transformer_ShareV_out_proj_FFN'
+            elif args.teacher_model_use_pretrained_v_shared_double_attn52_6ap_lr1_not_converged:
+                out_dir_ = 'logs/e6-d6-gt_split_only/teacher_model_use_pretrained_v_shared_double_attn52_6ap_lr1_not_converged'
             else:
-                if args.with_teacher_model == 'teacher_model_use_pretrained_v_shared_double_attn52_6ap':
-                    out_dir_ = 'logs/e6-d6-gt_split_only/share_double_head_transformer_ShareV_out_proj_FFN'
-                elif args.with_teacher_model == 'teacher_model_use_pretrained_v_shared_double_attn52_6ap_lr1_not_converged':
-                    out_dir_ = 'logs/e6-d6-gt_split_only/teacher_model_use_pretrained_v_shared_double_attn52_6ap_lr1_not_converged'
-                elif args.with_teacher_model == 'teacher_model_use_pretrained_v_shared_double_attn52_2ap':
-                    out_dir_ = 'logs/e6-d6-gt_split_only/share_double_head_transformer_ShareV_out_proj_FFN_lr0.1_from_epoch35'
+                out_dir_ = 'logs/e6-d6-gt_split_only/share_double_head_transformer_ShareV_out_proj_FFN_lr0.1_from_epoch35'
+            print(f'out_dir_ = {out_dir_}')
+            args_pretrained_model = proposal_parser.parse_args(
+                args=
+                [
+                    '-m', 'sgdt_dn_dab_detr',
+                    '--output_dir', f'{out_dir_}',
+                    '--coco_path', f'{os.path.join(LIB_ROOT_DIR, "coco")}',
+                    '--use_dn',
+                    # 'eval',
+                    '--encoder_layer_config', 'regular_4-parallelSTECSGDTShareVOutProjFFN_1',
+                    '--pretrain_model_path', f'{os.path.join(out_dir_, "checkpoint.pth")}',
+                    '--token_scoring_discard_split_criterion', 'gt_only_exp-no_bg_token_remove',
+                    '--token_scoring_loss_criterion', 'gt_fg_scale_fake',
+                    '--token_scoring_gt_criterion', 'significance_value',
+                    '--pad_fg_pixel', '0',
+                    # '--eval_decoder_layer', '3',
+                    '--share_double_head_transformer',
+                    '--decoder_layer_config', 'regular_4',
+                ]
+            )
 
-
-                # print(f'out_dir_ = {out_dir_}')
-                args_pretrained_model = proposal_parser.parse_args(
-                    args=
-                    [
-                        '-m', 'sgdt_dn_dab_detr',
-                        '--output_dir', f'{out_dir_}',
-                        '--coco_path', f'{os.path.join(LIB_ROOT_DIR, "coco")}',
-                        '--use_dn',
-                        '--encoder_layer_config', 'regular_4-DualAttnShareVOutProjFFN_1',
-                        '--pretrain_model_path', f'{os.path.join(out_dir_, "checkpoint_transfer_weight.pth")}',  # TODO:
-                        '--token_scoring_discard_split_criterion', 'gt_only_exp-no_bg_token_remove',
-                        '--token_scoring_loss_criterion', 'gt_fg_scale_fake',
-                        '--token_scoring_gt_criterion', 'significance_value',
-                        '--pad_fg_pixel', '0',
-                        '--transformer_type', 'share_double_head_transformer',
-                        '--decoder_layer_config', 'regular_4',  # TODO: Adapt this based on different experiments
-                        '--token_masking', 'sMLP',
-                        '--token_masking_loc', 'K',
-                        '--is_teacher_model',
-                    ]
-                )
-
-        elif args.with_teacher_model == 'teacher_model_use_pretrained_attn_learning_model':
+        elif args.teacher_model_use_pretrained_attn_learning_model:
             """
             encoder_layer_config=regular_6
             exp_str=ST_attention_learning_no_decoder_from_sMLP_Fg_KV51AP
@@ -1326,9 +1117,7 @@ def main(args):
         proposal_model = get_trained_models()
 
     teacher_model = None
-    # if args.feature_attn_distillation or args.with_teacher_model:
-    #     teacher_model = get_distillation_pretrained_models()
-    if args.with_teacher_model:
+    if args.feature_attn_distillation or args.with_teacher_model:
         teacher_model = get_distillation_pretrained_models()
 
     if args.eval:
@@ -1343,21 +1132,18 @@ def main(args):
 
         coco_evaluator = None
         for eval_decoder_layer in eval_decoder_layers:
-            test_stats, coco_evaluator = evaluate(
-                model, criterion, postprocessors,
-                data_loader_val, base_ds, device, args.output_dir,
-                wo_class_error=wo_class_error,
-                args=args,
-                proposal_model=proposal_model,
-                # only include teacher if sharing something
-                teacher_model=teacher_model if args.with_teacher_model_for_feature_attn_sharing else None,
-                eval_decoder_layer=eval_decoder_layer,
-                epoch=args.start_epoch
-                # proposal_processor=model.sgdt.proposal_processor
-            )
+            test_stats, coco_evaluator = evaluate(model, criterion, postprocessors,
+                                                  data_loader_val, base_ds, device, args.output_dir,
+                                                  wo_class_error=wo_class_error,
+                                                  args=args,
+                                                  proposal_model=proposal_model,
+                                                  teacher_model=teacher_model,
+                                                  eval_decoder_layer=eval_decoder_layer,
+                                                  epoch=args.start_epoch
+                                                  # proposal_processor=model.sgdt.proposal_processor
+                                                  )
             if args.output_dir:
-                utils.save_on_master(coco_evaluator.coco_eval["bbox"].eval,
-                                     output_dir / f"eval-{eval_decoder_layer}.pth")
+                utils.save_on_master(coco_evaluator.coco_eval["bbox"].eval, output_dir / f"eval-{eval_decoder_layer}.pth")
 
             log_stats = {**{f'test_{k}': v for k, v in test_stats.items()}}
             if args.output_dir and utils.is_main_process():
@@ -1371,23 +1157,6 @@ def main(args):
             # if args.output_dir and utils.is_main_process():
             #     with (output_dir / "log.txt").open("a") as f:
             #         f.write(json.dumps(log_stats) + "\n")
-
-        # parser.add_argument('--transfer_weight', action='store_true')
-        # parser.add_argument('--no_train_eval', action='store_true')
-        # parser.add_argument('--save_transfered_weight', action='store_true')
-        if args.save_transfered_weight and args.transfer_weight and args.pretrain_model_path:
-            checkpoint_paths = [args.pretrain_model_path.replace('.pth', '') + f'_transfer_weight.pth']
-            # # extra checkpoint before LR drop and every 100 epochs
-            # if (epoch + 1) % args.lr_drop == 0 or (epoch + 1) % args.save_checkpoint_interval == 0:
-            #     checkpoint_paths.append(output_dir / f'checkpoint{epoch:04}.pth')
-            for checkpoint_path in checkpoint_paths:
-                utils.save_on_master({
-                    'model': model_without_ddp.state_dict(),
-                    'optimizer': optimizer.state_dict(),
-                    'lr_scheduler': lr_scheduler.state_dict(),
-                    # 'epoch': epoch,
-                    'args': args,
-                }, checkpoint_path)
 
         return coco_evaluator
 
@@ -1410,8 +1179,7 @@ def main(args):
         # store this id to use it later when resuming
         id = wandb.util.generate_id()
         # wandb.init(id=id, resume="allow")
-        wandb.init(project="SGDT",   # prediction-distillation
-                   entity="kaikaizhao", name=exp_prefix,
+        wandb.init(project="SGDT", entity="kaikaizhao", name=exp_prefix,
                    id=id, resume="allow",
                    # resume=True
                    )
@@ -1434,7 +1202,7 @@ def main(args):
             wandb=wandb,  # --------
             gt_ratio_or_sigma=gt_ratio_or_sigma,
             proposal_model=proposal_model,
-            teacher_model=teacher_model,  # always include teacher model during training
+            teacher_model=teacher_model,
             # proposal_processor=model.sgdt.proposal_processor
         )
         if args.output_dir:
@@ -1481,8 +1249,7 @@ def main(args):
                     # --------
                     wandb=wandb,
                     proposal_model=proposal_model,
-                    # only include teacher if sharing something
-                    teacher_model=teacher_model if args.with_teacher_model_for_feature_attn_sharing else None,
+                    teacher_model=teacher_model,
                     eval_decoder_layer=eval_decoder_layer,
                     epoch=epoch,
                     # proposal_processor=model.sgdt.proposal_processor

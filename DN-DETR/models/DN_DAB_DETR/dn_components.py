@@ -174,7 +174,6 @@ def dn_post_process(outputs_class, outputs_coord, mask_dict):
         output_known_coord = outputs_coord[:, :, :mask_dict['pad_size'], :]
         outputs_class = outputs_class[:, :, mask_dict['pad_size']:, :]
         outputs_coord = outputs_coord[:, :, mask_dict['pad_size']:, :]
-        # torch.Size([6, 2, 200, 91]) torch.Size([6, 2, 200, 4])
         mask_dict['output_known_lbs_bboxes']=(output_known_class,output_known_coord)
     return outputs_class, outputs_coord
 

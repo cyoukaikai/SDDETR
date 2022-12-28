@@ -8,6 +8,6 @@ from .DN_DAB_DETR import build_DABDETR
 # from .dn_dab_deformable_detr import build_dab_deformable_detr
 # from .dn_dab_deformable_detr_deformable_encoder_only import build_dab_deformable_detr_deformable_encoder_only
 from .sgdt_dn_dab_detr import build_SGDT_DABDETR
-from .sgdt_dn_dab_detr.sgdt_fg_bg_classifier import build_token_classifier
+# from .sgdt_dn_dab_detr.sgdt_fg_bg_classifier import build_token_classifier
 
 

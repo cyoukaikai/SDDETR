@@ -30,7 +30,7 @@ python -m torch.distributed.launch --nproc_per_node=$GPU_NUM --master_port=$mast
  main.py -m sgdt_dn_dab_detr \
   --output_dir logs/$out_dir/$exp_str \
   --exp_str  $exp_str \
-  --batch_size 8 \
+  --batch_size 2 \
   --epochs 50 \
   --lr_drop 40 \
   --coco_path coco \

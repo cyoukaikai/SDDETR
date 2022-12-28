@@ -49,64 +49,11 @@ class SGDT_DABDETR(DABDETR):
         self.train_token_scoring_only = train_token_scoring_only
 
         # two decoder
-        if self.iter_update and sgdt.args.transformer_type == 'double_head_transformer':
+        if self.iter_update and sgdt.double_head_transformer:
             self.transformer.decoder_t.bbox_embed = self.bbox_embed
 
-    def _extract_predict(self, hs, reference, mask_dict):
-
-        if not self.bbox_embed_diff_each_layer:
-            reference_before_sigmoid = inverse_sigmoid(reference)
-            tmp = self.bbox_embed(hs)
-            tmp[..., :self.query_dim] += reference_before_sigmoid
-            outputs_coord = tmp.sigmoid()
-        else:
-            reference_before_sigmoid = inverse_sigmoid(reference)
-            outputs_coords = []
-            for lvl in range(hs.shape[0]):
-                tmp = self.bbox_embed[lvl](hs[lvl])
-                tmp[..., :self.query_dim] += reference_before_sigmoid[lvl]
-                outputs_coord = tmp.sigmoid()
-                outputs_coords.append(outputs_coord)
-            outputs_coord = torch.stack(outputs_coords)
-
-        outputs_class = self.class_embed(hs)
-        # dn post process
-        outputs_class, outputs_coord = dn_post_process(outputs_class, outputs_coord, mask_dict)
-        return outputs_class, outputs_coord
-
-    def extract_output(self, hs, reference, mask_dict):
-        if isinstance(hs, (list, tuple)) and isinstance(reference, (list, tuple)):
-            outputs_class, outputs_coord = [], []
-            output_known_class, output_known_coord = [], []
-            for hs_, ref_ in zip(hs, reference):
-                # torch.Size([6, 2, 200, 91]) torch.Size([6, 2, 200, 4])
-                # mask_dict['output_known_lbs_bboxes']=(output_known_class,output_known_coord)
-
-                cls, box = self._extract_predict(hs=hs_, reference=ref_, mask_dict=mask_dict)
-                outputs_class.append(cls)
-                outputs_coord.append(box)
-
-                if mask_dict and 'output_known_lbs_bboxes' in mask_dict:
-                    output_known_class_tmp, output_known_coord_tmp = mask_dict['output_known_lbs_bboxes']
-
-                    output_known_class.append(output_known_class_tmp)
-                    output_known_coord.append(output_known_coord_tmp)
-
-            # torch.Size([4, 2, 300, 4])
-            outputs_class, outputs_coord = torch.concat(outputs_class, dim=0), torch.concat(outputs_coord, dim=0)
-
-            if len(output_known_class) > 0:
-                output_known_class, output_known_coord = torch.concat(output_known_class, dim=0), \
-                                                         torch.concat(output_known_coord, dim=0)
-                mask_dict['output_known_lbs_bboxes'] = (output_known_class, output_known_coord)
-
-
-        else:
-            outputs_class, outputs_coord = self._extract_predict(hs=hs, reference=reference, mask_dict=mask_dict)
-        return outputs_class, outputs_coord
-
     def forward(self, samples: NestedTensor, dn_args=None, sgdt_args=None,
-                teacher_encoder_decoder_out_dict=None,
+                teacher_encoder_output_list=None,
                 training_skip_forward_decoder=False,
                 # proposal_processor=None,
                 ):
@@ -163,10 +110,8 @@ class SGDT_DABDETR(DABDETR):
             # self.sgdt.set_sgdt_targets(targets, feat_map_size=(h, w)) # , src_key_padding_mask=mask
             # if teacher_encoder_output_list is not None:
             #     self.sgdt.teacher_encoder_output_list = teacher_encoder_output_list
-        #  input_query_bbox, object queries.
-        # pos,  requires_grad = False
-        assert teacher_encoder_decoder_out_dict is None or isinstance(teacher_encoder_decoder_out_dict, dict)
-        hs, reference, sgdt_output_list, encoder_decoder_out_dict = self.transformer(
+        # pos[-1] input_query_bbox, object queries.
+        hs, reference, sgdt_output_list, encoder_output_list = self.transformer(
             self.input_proj(src), mask, input_query_bbox, pos[-1],  # src, mask, refpoint_embed, pos_embed, tgt
             tgt=input_query_label,  # torch.Size([320, 2, 256]) decoder features, or decoder embedding,
             attn_mask=attn_mask,
@@ -174,7 +119,7 @@ class SGDT_DABDETR(DABDETR):
             mask_dict=mask_dict,
             class_embed=self.class_embed,
             sgdt=self.sgdt,
-            teacher_encoder_decoder_out_dict=teacher_encoder_decoder_out_dict,
+            teacher_encoder_output_list=teacher_encoder_output_list,
             skip_teacher_model_decoder_forward=training_skip_forward_decoder,
             # sgdt_targets=sgdt_targets,
             # targets=targets,
@@ -182,19 +127,19 @@ class SGDT_DABDETR(DABDETR):
             # input_img_sizes=input_img_sizes,
             # token_scoring_gt_generator=self.token_scoring_gt_generator,
         )
-        assert isinstance(encoder_decoder_out_dict, dict)
+
         sgdt_out = dict(
             sgdt_output_list=sgdt_output_list,
             # sgdt_targets=self.sgdt.sgdt_targets,
             # sgdt_target_raw=self.sgdt.sgdt_target_raw,
-            encoder_decoder_out_dict=encoder_decoder_out_dict,
-            teacher_encoder_decoder_out_dict=teacher_encoder_decoder_out_dict,
+            encoder_output_list=encoder_output_list,
+            teacher_encoder_output_list=teacher_encoder_output_list,
             src_key_padding_mask=self.sgdt.src_key_padding_mask,
             sgdt=self.sgdt
         )
 
         if len(self.sgdt.auxiliary_fg_bg_cls_encoder_layer_ids) > 0:
-            token_ft_bg_predict_out = self.sgdt.token_fg_bg_classier(encoder_decoder_out_dict)
+            token_ft_bg_predict_out = self.sgdt.token_fg_bg_classier(encoder_output_list)
             sgdt_out.update(token_ft_bg_predict_out)
 
         if training_skip_forward_decoder:
@@ -203,49 +148,30 @@ class SGDT_DABDETR(DABDETR):
         if self.training and self.train_token_scoring_only:
             return sgdt_out, mask_dict
         # ------------------------
-        outputs_class, outputs_coord = self.extract_output(hs=hs, reference=reference, mask_dict=mask_dict)
+
+        if not self.bbox_embed_diff_each_layer:
+            reference_before_sigmoid = inverse_sigmoid(reference)
+            tmp = self.bbox_embed(hs)
+            tmp[..., :self.query_dim] += reference_before_sigmoid
+            outputs_coord = tmp.sigmoid()
+        else:
+            reference_before_sigmoid = inverse_sigmoid(reference)
+            outputs_coords = []
+            for lvl in range(hs.shape[0]):
+                tmp = self.bbox_embed[lvl](hs[lvl])
+                tmp[..., :self.query_dim] += reference_before_sigmoid[lvl]
+                outputs_coord = tmp.sigmoid()
+                outputs_coords.append(outputs_coord)
+            outputs_coord = torch.stack(outputs_coords)
+
+        outputs_class = self.class_embed(hs)
+        # dn post process
+        outputs_class, outputs_coord = dn_post_process(outputs_class, outputs_coord, mask_dict)
         out = {'pred_logits': outputs_class[-1], 'pred_boxes': outputs_coord[-1]}
         if self.aux_loss:
             out['aux_outputs'] = self._set_aux_loss(outputs_class, outputs_coord)
 
-        # ------------------ for the student model of prediction distillation transformer
-        if 'distillation_hs' in encoder_decoder_out_dict and 'distillation_references' in encoder_decoder_out_dict:
-            # student prediction (used to conduct prediction distillation)
-            distillation_hs, distillation_references = encoder_decoder_out_dict['distillation_hs'], \
-                                                       encoder_decoder_out_dict['distillation_references']
-            distillation_outputs_class, distillation_outputs_coord = self.extract_output(
-                hs=distillation_hs, reference=distillation_references,
-                mask_dict=mask_dict)
-
-            for k in range(len(distillation_outputs_class)):
-                if len(sgdt_out['encoder_decoder_out_dict']['decoder_out_list'][k]) == 0:
-                    sgdt_out['encoder_decoder_out_dict']['decoder_out_list'][k] = {}
-
-                decoder_predictions = {'pred_logits': distillation_outputs_class[k],
-                                       'pred_boxes': distillation_outputs_coord[k]}
-                sgdt_out['encoder_decoder_out_dict']['decoder_out_list'][k].update(decoder_predictions)
-        else:  # Normal transformer
-            # teacher prediction (used to conduct prediction distillation)
-            if self.sgdt.args.is_teacher_model and self.sgdt.args.transformer_type == 'share_double_head_transformer':
-                # the second half of the predictions are for the teacher model
-                outputs_class = outputs_class[len(outputs_class) // 2:]
-                outputs_coord = outputs_coord[len(outputs_coord) // 2:]
-
-                if 'decoder_out_list' not in sgdt_out['encoder_decoder_out_dict']:
-                    sgdt_out['encoder_decoder_out_dict']['decoder_out_list'] = [{} for _ in range(len(outputs_class))]
-
-                # return [{'pred_logits': a, 'pred_boxes': b}
-                #         for a, b in zip(outputs_class[:-1], outputs_coord[:-1])]
-
-                for k in range(len(outputs_class)):
-                    decoder_predictions = {'pred_logits': outputs_class[k], 'pred_boxes': outputs_coord[k]}
-
-                    if 'decoder_out_list' in sgdt_out['encoder_decoder_out_dict']:
-                        assert isinstance(sgdt_out['encoder_decoder_out_dict']['decoder_out_list'][k], dict)
-                    sgdt_out['encoder_decoder_out_dict']['decoder_out_list'][k].update(decoder_predictions)
-            else:
-                pass  # do nothing for normal task (no distillation is conducted)
-
+        # ------------------ tti modification
         out.update(sgdt_out)
         return out, mask_dict
 
@@ -274,163 +200,114 @@ class SetCriterion(SetCriterionOld):
         if len(self.sgdt.auxiliary_fg_bg_cls_encoder_layer_ids) > 0:
             self.token_classification_loss = TokenFgBgClassificationLoss(sgdt=sgdt, weight_dict=weight_dict)
 
-        # coco category ids
-        self.cat_ids = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 14, 15, 16, 17, 18,
-                        19, 20, 21, 22, 23, 24, 25, 27, 28, 31, 32, 33, 34, 35, 36,
-                        37, 38, 39, 40, 41, 42, 43, 44, 46, 47, 48, 49, 50, 51, 52,
-                        53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 67, 70,
-                        72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 84, 85, 86,
-                        87, 88, 89, 90]
 
-    def cal_decoder_distill_loss(self, outputs, targets,
-                                 # mask_dict=None, return_indices=False
-                                 ):
+    def cal_decoder_distill_loss(self, outputs, targets, mask_dict=None, return_indices=False):
+        outputs_without_aux = {k: v for k, v in outputs.items() if k != 'aux_outputs'}
+
+        # Retrieve the matching between the outputs of the last layer and the targets
+        indices = self.matcher(outputs_without_aux, targets)
+        if return_indices:
+            indices0_copy = indices
+            indices_list = []
+
+        # Compute the average number of target boxes accross all nodes, for normalization purposes
+        num_boxes = sum(len(t["labels"]) for t in targets)
+        num_boxes = torch.as_tensor([num_boxes], dtype=torch.float, device=next(iter(outputs.values())).device)
+        if is_dist_avail_and_initialized():
+            torch.distributed.all_reduce(num_boxes)
+        num_boxes = torch.clamp(num_boxes / get_world_size(), min=1).item()
+        # Compute all the requested losses
+        losses = {}
+
+        for loss in self.losses:
+            losses.update(self._get_decoder_distill_loss(loss, outputs, targets, indices, num_boxes))
+
+        # In case of auxiliary losses, we repeat this process with the output of each intermediate layer.
+        if 'aux_outputs' in outputs:
+            for i, aux_outputs in enumerate(outputs['aux_outputs']):
+                indices = self.matcher(aux_outputs, targets)
+                if return_indices:
+                    indices_list.append(indices)
+                for loss in self.losses:
+                    if loss == 'masks':
+                        # Intermediate masks losses are too costly to compute, we ignore them.
+                        continue
+                    kwargs = {}
+                    if loss == 'labels':
+                        # Logging is enabled only for the last layer
+                        kwargs = {'log': False}
+                    l_dict = self._get_decoder_distill_loss(loss, aux_outputs, targets, indices, num_boxes, **kwargs)
+                    l_dict = {k + f'_{i}': v for k, v in l_dict.items()}
+                    losses.update(l_dict)
+
+    def _get_decoder_distill_loss(self, loss, outputs, targets, indices, num_boxes, **kwargs):
         loss_map = {
             'labels': self.decoder_distill_loss_labels,
             # 'cardinality': self.loss_cardinality,
             'boxes': self.decoder_distill_loss_boxes,
+            # 'masks': self.loss_masks
         }
+        assert loss in loss_map, f'do you really want to compute {loss} loss?'
+        return loss_map[loss](outputs, targets, indices, num_boxes, **kwargs)
 
-        losses = {}
-        for loss in loss_map:
-            losses.update(
-                loss_map[loss](outputs, targets, )
-            )
-        return losses
-
-    def decoder_distill_loss_labels(self, outputs, targets,
-                                    # indices, num_boxes, log=True
-                                    ):
+    def decoder_distill_loss_labels(self, outputs, targets, indices, num_boxes, log=True):
         """Classification loss (Binary focal loss)
         targets dicts must contain the key "labels" containing a tensor of dim [nb_target_boxes]
         """
-        assert 'pred_logits' in outputs and 'pred_logits' in targets
+        assert 'pred_logits' in outputs
+        src_logits = outputs['pred_logits']
 
-        bz, nq, nc = outputs['pred_logits'].shape  # batch size, number of query, number of class
-        pred_logits = outputs['pred_logits'].flatten(0, 1)  # torch.Size([2, 300, 91])
-        target_logits = targets['pred_logits'].flatten(0, 1)
+        idx = self._get_src_permutation_idx(indices)
+        target_classes_o = torch.cat([t["labels"][J] for t, (_, J) in zip(targets, indices)])
+        target_classes = torch.full(src_logits.shape[:2], self.num_classes,
+                                    dtype=torch.int64, device=src_logits.device)
+        target_classes[idx] = target_classes_o
 
-        # * valid_mask).sum() / (bsz * num_heads * src_len * weight)
-        loss_kl = F.kl_div(F.log_softmax(pred_logits, dim=-1, dtype=torch.float32),
-                           F.softmax(target_logits, dim=-1, dtype=torch.float32),
-                           reduction='none')
+        target_classes_onehot = torch.zeros([src_logits.shape[0], src_logits.shape[1], src_logits.shape[2] + 1],
+                                            dtype=src_logits.dtype, layout=src_logits.layout, device=src_logits.device)
+        target_classes_onehot.scatter_(2, target_classes.unsqueeze(-1), 1)
 
-        avg_factor = bz * nq
-        loss_kl = loss_kl.sum() / avg_factor
+        target_classes_onehot = target_classes_onehot[:, :, :-1]
+        loss_ce = sigmoid_focal_loss(src_logits, target_classes_onehot, num_boxes, alpha=self.focal_alpha, gamma=2) * \
+                  src_logits.shape[1]
+        losses = {'loss_ce': loss_ce}
 
-        # loss_criterion = torch.nn.CrossEntropyLoss(reduction='none')  # =0.1 epsilon=0,
-        # ce_loss = loss_criterion(pred_logits, target_logits.softmax(dim=-1))  # torch.Size([713, 2])
-        # ce_loss = ce_loss.sum() / avg_factor
-
-        # idx = self._get_src_permutation_idx(indices)
-        # target_classes_o = torch.cat([t["labels"][J] for t, (_, J) in zip(targets, indices)])
-        # target_classes = torch.full(src_logits.shape[:2], self.num_classes,
-        #                             dtype=torch.int64, device=src_logits.device)
-        # target_classes[idx] = target_classes_o
-        #
-        # target_classes_onehot = torch.zeros([src_logits.shape[0], src_logits.shape[1], src_logits.shape[2] + 1],
-        #                                     dtype=src_logits.dtype, layout=src_logits.layout, device=src_logits.device)
-        # target_classes_onehot.scatter_(2, target_classes.unsqueeze(-1), 1)
-        #
-        # target_classes_onehot = target_classes_onehot[:, :, :-1]
-        # loss_ce = sigmoid_focal_loss(src_logits, target_classes_onehot, num_boxes, alpha=self.focal_alpha, gamma=2) * \
-        #           src_logits.shape[1]
-        #                 'sgdt_decoder_pred_cls_distill_loss' + f'_{i}': args.sgdt_decoder_pred_cls_distill_loss_loss_coef,
-        #                 'sgdt_decoder_pred_loc_distill_loss' + f'_{i}': args.sgdt_decoder_pred_loc_distill_loss_loss_coef,
-        losses = {'sgdt_decoder_pred_cls_distill_loss': loss_kl}
-        # if log:
-        #     # TODO this should probably be a separate loss, not hacked in this one here
-        #     losses['class_error'] = 100 - accuracy(src_logits[idx], target_classes_o)[0]
-        with torch.no_grad():
-            pred_labels = pred_logits.max(dim=-1).indices
-            target_labels = target_logits.max(dim=-1).indices
-            acc = (pred_labels == target_labels).sum() / target_labels.numel()
-            losses['sgdt_decoder_pred_cls_distill_loss_accu'] = acc
+        if log:
+            # TODO this should probably be a separate loss, not hacked in this one here
+            losses['class_error'] = 100 - accuracy(src_logits[idx], target_classes_o)[0]
         return losses
 
-    def decoder_distill_loss_boxes(self, outputs, targets,
-                                   cal_loss_only_on_positive_box=False,
-                                   # indices, num_boxes
-                                   ):
+
+    def decoder_distill_loss_boxes(self, outputs, targets, indices, num_boxes):
         """Compute the losses related to the bounding boxes, the L1 regression loss and the GIoU loss
            targets dicts must contain the key "boxes" containing a tensor of dim [nb_target_boxes, 4]
            The target boxes are expected in format (center_x, center_y, w, h), normalized by the image size.
         """
-        assert 'pred_boxes' in outputs and 'pred_boxes' in targets
-        bz, nq, nb = outputs['pred_boxes'].shape  # batch size, number of query, box dimension (4)
-        pred_boxes = outputs['pred_boxes'].flatten(0, 1)  # We must make sure the pred_boxes to be 2d to use giou loss.
-        target_boxes = targets['pred_boxes'].flatten(0, 1)
+        assert 'pred_boxes' in outputs
+        idx = self._get_src_permutation_idx(indices)
+        src_boxes = outputs['pred_boxes'][idx]
+        target_boxes = torch.cat([t['boxes'][i] for t, (_, i) in zip(targets, indices)], dim=0)
 
-        # idx = self._get_src_permutation_idx(indices)
-        # src_boxes = outputs['pred_boxes'][idx]
-        # target_boxes = torch.cat([t['boxes'][i] for t, (_, i) in zip(targets, indices)], dim=0)
+        loss_bbox = F.l1_loss(src_boxes, target_boxes, reduction='none')
 
-        # get the foreground box ids
-        num_boxes = bz * nq
         losses = {}
-        loss_bbox = F.l1_loss(pred_boxes, target_boxes, reduction='none')
-        # losses['loss_bbox'] = loss_bbox.sum() / num_boxes
+        losses['loss_bbox'] = loss_bbox.sum() / num_boxes
 
         loss_giou = 1 - torch.diag(box_ops.generalized_box_iou(
-            box_ops.box_cxcywh_to_xyxy(pred_boxes),
+            box_ops.box_cxcywh_to_xyxy(src_boxes),
             box_ops.box_cxcywh_to_xyxy(target_boxes)))
+        losses['loss_giou'] = loss_giou.sum() / num_boxes
 
-        if cal_loss_only_on_positive_box:
-
-            target_labels = targets['pred_logits'].flatten(0, 1).max(dim=-1).indices  #
-            fg_labels = torch.tensor(self.cat_ids, device=target_labels.device, dtype=target_labels.dtype)
-            num_class = fg_labels.numel()
-            # pos_indices1 = torch.zeros(len(target_labels))
-            # for k, x in enumerate(target_labels):
-            #     if x.item() in self.cat_ids:
-            #         pos_indices1[k] = 1
-            # pos_indices1 = pos_indices1.bool()
-
-            target_labels_expanded = target_labels.reshape(-1, 1).repeat(1, num_class)
-            fg_labels_expanded = fg_labels.reshape(1, num_class).repeat(target_labels.shape[0], 1)
-            in_flag = target_labels_expanded == fg_labels_expanded
-            pos_indices = torch.any(in_flag, dim=-1)
-            # assert torch.equal(pos_indices1, pos_indices.cpu())  # passed.
-            box_weight = pos_indices.float()
-
-            # pred_boxes = pred_boxes[pos_indices]
-            # target_boxes = target_boxes[pos_indices]
-            num_boxes = pos_indices.sum()
-            loss = ((loss_bbox * box_weight.reshape(-1, 1)).sum() + (loss_giou * box_weight).sum()) / num_boxes
-        else:
-            # losses['loss_giou'] = loss_giou.sum() / num_boxes
-            loss = loss_bbox.sum() / num_boxes + loss_giou.sum() / num_boxes
-
-        losses['sgdt_decoder_pred_loc_distill_loss'] = loss
-
-        # # calculate the x,y and h,w loss
+        # calculate the x,y and h,w loss
         with torch.no_grad():
-            losses['sgdt_decoder_distillation_loss_xy'] = loss_bbox[..., :2].sum() / num_boxes
-            losses['sgdt_decoder_distillation_loss_hw'] = loss_bbox[..., 2:].sum() / num_boxes
+            losses['loss_xy'] = loss_bbox[..., :2].sum() / num_boxes
+            losses['loss_hw'] = loss_bbox[..., 2:].sum() / num_boxes
 
         return losses
 
     def forward(self, outputs, targets, mask_dict=None, return_indices=False, proposals=None):
 
         sgdt_losses = {}  # sgdt loss
-
-        layer_ids = self.sgdt.args.with_pred_distill_decoder_layer_ids
-        if layer_ids and len(layer_ids) > 0 and self.training:  #
-            # decoder_prediction
-            layer_out_list_student = outputs['encoder_decoder_out_dict']['decoder_out_list']
-            layer_out_list_teacher = outputs['teacher_encoder_decoder_out_dict']['decoder_out_list']
-
-            for i in layer_ids:
-                assert i < len(layer_out_list_student) and \
-                       i < len(layer_out_list_teacher), f'The given layer ids {layer_ids} to conduct' \
-                                                        ' prediction distillation is invalid.'
-                l_dict = self.cal_decoder_distill_loss(
-                    outputs=layer_out_list_student[i],
-                    targets=layer_out_list_teacher[i],
-                )
-                l_dict = {k + f'_{i}': v for k, v in l_dict.items()}
-                sgdt_losses.update(l_dict)
-
         if not self.sgdt.disable_fg_scale_supervision and \
                 'sgdt_output_list' in outputs and len(outputs['sgdt_output_list']) > 0:
             sgdt_output_list = outputs['sgdt_output_list']
@@ -515,6 +392,67 @@ class SetCriterion(SetCriterionOld):
         if self.sgdt.with_sgdt_attention_loss:  # and self.training
             assert self.sgdt.sgdt_attention_loss is not None
 
+            encoder_attn_logit_map_list = [x['attn_map_logits'] for x in outputs['encoder_output_list']]
+
+            if outputs['teacher_encoder_output_list'] is not None:
+                # offline distillation
+
+                teacher_encoder_attn_logit_map_list = [
+                    x['attn_map_online_teacher'] for x in outputs['teacher_encoder_output_list']
+                    if 'attn_map_online_teacher' in x and x['attn_map_online_teacher'] is not None]
+                if len(teacher_encoder_attn_logit_map_list) == 0:
+                    teacher_encoder_attn_logit_map_list = [
+                        x['attn_map_logits'] for x in outputs['teacher_encoder_output_list']
+                        if 'attn_map_logits' in x and x['attn_map_logits'] is not None]
+
+                assert len(teacher_encoder_attn_logit_map_list) > 0 and len(encoder_attn_logit_map_list) > 0
+
+                # we always use the last encoder layer to conduct feature distillation
+                student_attn_logit_map = encoder_attn_logit_map_list[-1]
+                teacher_attn_logit_map = teacher_encoder_attn_logit_map_list[-1]
+
+            elif 'attn_map_online_teacher' in outputs['encoder_output_list'][-1]:
+                # Online distillation
+                teacher_attn_logit_map = outputs['encoder_output_list'][-1]['attn_map_online_teacher']
+                student_attn_logit_map = encoder_attn_logit_map_list[-1]
+                assert student_attn_logit_map.shape == teacher_attn_logit_map.shape and not \
+                    (torch.equal(teacher_attn_logit_map, student_attn_logit_map))
+                # bug check in case I passed attn of teacher to the student
+
+            else:
+                # conduct distillation for the last single non-sgdt layers.
+                normal_layer_ids, sgdt_layer_ids = split_encoder_layer(
+                    encoder_layer_config=self.sgdt.encoder_layer_config)
+
+                assert len(sgdt_layer_ids) > 0 and len(normal_layer_ids) > 0
+                student_encoder_layer_id = normal_layer_ids[-1]
+                teacher_encoder_layer_id = sgdt_layer_ids[-1]
+
+                student_attn_logit_map = encoder_attn_logit_map_list[student_encoder_layer_id]
+                teacher_attn_logit_map = encoder_attn_logit_map_list[teacher_encoder_layer_id]
+
+            # the order is important.
+            # outputs['sgdt_output_list'][-1]['valid_tokens']
+            if self.sgdt.attn_distillation_teacher_with_grad:
+                sgdt_losses['sgdt_attention_distillation_loss'] = self.sgdt.sgdt_attention_loss(
+                    input=student_attn_logit_map, target=teacher_attn_logit_map,
+                    # examples always use .detach()
+                    valid_tokens_float=self.sgdt.valid_tokens_float,
+                    top_k=100 if self.sgdt.attention_loss_top_100_token else None
+                    # TODO: change -1 to be a more general version.
+                )
+            else:
+                sgdt_losses['sgdt_attention_distillation_loss'] = self.sgdt.sgdt_attention_loss(
+                    input=student_attn_logit_map, target=teacher_attn_logit_map.detach(),
+                    # examples always use .detach()
+                    valid_tokens_float=self.sgdt.valid_tokens_float,
+                    top_k=100 if self.sgdt.attention_loss_top_100_token else None
+                    # TODO: change -1 to be a more general version.
+                )
+            # src_key_padding_mask
+
+        if self.sgdt.args.with_decoder_prediction_distillation:  # and self.training
+            # decoder_prediction
             encoder_attn_logit_map_list = [x['attn_map_logits'] for x in outputs['encoder_output_list']]
 
             if outputs['teacher_encoder_output_list'] is not None:
@@ -750,7 +688,7 @@ def build_SGDT_DABDETR(args):
     # TODO this is a hack
     if args.aux_loss:
         aux_weight_dict = {}
-        for i in range(args.dec_layers * 3 - 1):
+        for i in range(args.dec_layers * 2 - 1):
             aux_weight_dict.update({k + f'_{i}': v for k, v in weight_dict.items()})
         weight_dict.update(aux_weight_dict)
 
@@ -773,15 +711,15 @@ def build_SGDT_DABDETR(args):
     weight_dict['sgdt_attention_distillation_loss'] = args.sgdt_attention_loss_coef
     weight_dict['sgdt_transformer_feature_distillation_loss'] = args.sgdt_transformer_feature_distillation_loss_coef
 
-    # parser.add_argument('--sgdt_decoder_pred_cls_distill_loss_loss_coef', default=2.0, type=float,)
-    # parser.add_argument('--sgdt_decoder_pred_loc_distill_loss_loss_coef', default=5.0, type=float,)
+    # parser.add_argument('--sgdt_decoder_pred_cls_loss_coef', default=2.0, type=float,)
+    # parser.add_argument('--sgdt_decoder_pred_loc_loss_coef', default=5.0, type=float,)
     sgdt_weight_dict = {}
-    for i in range(args.dec_layers * 3 - 1):
+    for i in range(args.dec_layers * 2 - 1):
         sgdt_weight_dict.update(
             {
-                'sgdt_decoder_pred_cls_distill_loss' + f'_{i}': args.sgdt_decoder_pred_cls_distill_loss_loss_coef,
-                'sgdt_decoder_pred_loc_distill_loss' + f'_{i}': args.sgdt_decoder_pred_loc_distill_loss_loss_coef,
-            }
+                'sgdt_decoder_pred_cls' + f'_{i}': args.sgdt_decoder_pred_cls_loss_coef,
+                'sgdt_decoder_loc_cls' + f'_{i}': args.sgdt_decoder_pred_loc_loss_coef,
+             }
         )
     weight_dict.update(sgdt_weight_dict)
 

@@ -34,7 +34,12 @@ from models.DN_DAB_DETR.transformer import MLP, \
 from models.DN_DAB_DETR.transformer import TransformerDecoderLayer as TransformerDecoderLayerOld
 
 from models.sgdt_dn_dab_detr.decoder_cross_attention import DecoderMultiheadCrossAttention
-from models.sgdt.self_attn import MultiheadAttention, MultiheadDualAttention, MultiheadTripleAttention
+from models.sgdt.attn import MultiheadAttention
+from models.sgdt.attn_extended import MultiheadAttentionExtended
+from models.sgdt.attn_share_QV import MultiheadAttentionShareQV
+from models.sgdt.attn_share_V import MultiheadAttentionShareV
+from models.sgdt.attn_share_V_out_proj import MultiheadAttentionShareVOutProj
+from models.sgdt.attn_share_attn_out_proj import MultiheadAttentionShareAttnOutProj
 # from torch.nn import MultiheadAttention
 
 from models.sgdt.sgdt_module import SGDT_module, get_valid_token_mask, TokenScoringConfigParser
@@ -43,6 +48,9 @@ from models.DN_DAB_DETR.dn_components import dn_post_process
 from models.sgdt.scoring_gt import update_targets_with_proposals
 from models.sgdt.sgdt_components import parser_encoder_decoder_layers
 import numpy as np
+
+
+# from models.sgdt.sgdt_ import SGDT
 
 
 def extract_adapted_token_pos_embed(adapted_token_dict, pos: Optional[Tensor]):
@@ -109,15 +117,6 @@ class TransformerEncoderLayer(nn.Module):
     def with_pos_embed(self, tensor, pos: Optional[Tensor]):
         return tensor if pos is None else tensor + pos
 
-    def ffn_from_mha_out(self, src, mha_out, ):
-        src2 = mha_out
-        src = src + self.dropout1(src2)
-        src = self.norm1(src)
-        src2 = self.linear2(self.dropout(self.activation(self.linear1(src))))
-        src = src + self.dropout2(src2)
-        src = self.norm2(src)
-        return src
-
     def forward(self,
                 src,
                 src_mask: Optional[Tensor] = None,
@@ -133,79 +132,16 @@ class TransformerEncoderLayer(nn.Module):
         src2, _, attn_output_weight_logits = self.self_attn(q, k, value=src, attn_mask=src_mask,
                                                             key_padding_mask=src_key_padding_mask,
                                                             need_weights=True, average_attn_weights=False)  #
-        src = self.ffn_from_mha_out(src=src, mha_out=src2)
 
+        src = src + self.dropout1(src2)
+        src = self.norm1(src)
+        src2 = self.linear2(self.dropout(self.activation(self.linear1(src))))
+        src = src + self.dropout2(src2)
+        src = self.norm2(src)
         return src, attn_output_weight_logits
 
 
-def with_pos_embed(tensor, pos: Optional[Tensor]):
-    return tensor if pos is None else tensor + pos
-
-
-def get_token_gt_masking(src, token_masking, src_key_padding_mask, sgdt):
-    if token_masking == 'sMLP':
-        sgdt_output = sgdt(x=src, mask=src_key_padding_mask,
-                           # sgdt_targets=sgdt_targets,
-                           # feat_map_size=feat_map_size,  # (h, w)
-                           # sigma=sigma,
-                           )
-        src_with_gt = sgdt_output['x']  # with_pos_embed(sgdt_output['x'], pos=k_adapted_pos)
-    elif token_masking == 'MarkFg1Bg0':
-        src_with_gt = mark_encoder_feature_by_fg_gt(src.clone(), sgdt)
-    else:
-        raise NotImplementedError
-    return src_with_gt
-
-
-def get_self_attn_q_k_v(src,
-                        pos: Optional[Tensor] = None,
-                        src_key_padding_mask: Optional[Tensor] = None,
-                        sgdt=None, ):
-    token_masking = sgdt.args.token_masking
-    token_masking_loc = sgdt.args.token_masking_loc
-
-    # 'X', 'Q', 'K', 'V', 'QK', 'KV', 'MHA_Out', 'FFN_Out'
-    # q = k = v = None
-    if token_masking and token_masking_loc in ['X', 'Q', 'K', 'V', 'QK', 'KV', ]:
-
-        src_with_gt = get_token_gt_masking(
-            src=src, token_masking=token_masking,
-            src_key_padding_mask=src_key_padding_mask, sgdt=sgdt)
-
-        if token_masking_loc == 'X':
-            q = k = with_pos_embed(src_with_gt, pos)
-            v = src_with_gt
-        elif token_masking_loc == 'Q':
-            q = with_pos_embed(src_with_gt, pos)
-            k = with_pos_embed(src, pos)
-            # here it is save to use v = src, as the src here will not affect the src passed in
-            # (outside of this function)
-            v = src
-        elif token_masking_loc == 'K':
-            q = with_pos_embed(src, pos)
-            k = with_pos_embed(src_with_gt, pos)
-            v = src
-        elif token_masking_loc == 'V':
-            q = k = with_pos_embed(src, pos)
-            v = src_with_gt
-        elif token_masking_loc == 'QK':
-            q = k = with_pos_embed(src_with_gt, pos)
-            v = src
-        elif token_masking_loc == 'KV':
-            q = with_pos_embed(src, pos)
-            k = with_pos_embed(src_with_gt, pos)
-            v = src_with_gt
-        else:
-            raise NotImplementedError
-    else:
-        # no update (probably due to token_masking or token_masking_loc not set, or token_masking_loc in
-        # '[MHA_Out', 'FFN_Out'])
-        q = k = with_pos_embed(src, pos)
-        v = src  # TODO: to avoid a computer graph from v to q, k, no, as they are only used inside a single self-attn
-    return q, k, v
-
-
-class TransformerEncoderWithGTLayer(TransformerEncoderLayer):
+class TransformerEncoderMarkFgBgLayer(TransformerEncoderLayer):
     # Q from adapted tokens, k, v from original token
 
     def forward(self,
@@ -214,49 +150,643 @@ class TransformerEncoderWithGTLayer(TransformerEncoderLayer):
                 src_key_padding_mask: Optional[Tensor] = None,
                 pos: Optional[Tensor] = None,
                 sgdt=None,
-                # adapt_input_identify_mapping=False
                 ):
         # ---------------
-        q, k, v = get_self_attn_q_k_v(
-            src=src, pos=pos, src_key_padding_mask=src_key_padding_mask, sgdt=sgdt, )
+        marking_encoder_layer_fg1_bg0 = None
+        if sgdt is not None and sgdt.marking_encoder_layer_fg1_bg0:
+            marking_encoder_layer_fg1_bg0 = sgdt.marking_encoder_layer_fg1_bg0
 
-        src2, _, attn_output_weight_logits = self.self_attn(query=q, key=k, value=v, attn_mask=src_mask,
+        q = self.with_pos_embed(src, pos)
+        # ---------------
+
+        k, v = q.clone(), src.clone()
+        if marking_encoder_layer_fg1_bg0 == 'K':
+            k = mark_encoder_feature_by_fg_gt(k, sgdt)
+        elif marking_encoder_layer_fg1_bg0 == 'V':
+            v = mark_encoder_feature_by_fg_gt(v, sgdt)
+        elif marking_encoder_layer_fg1_bg0 == 'Q':
+            q = mark_encoder_feature_by_fg_gt(q, sgdt)
+
+        src2, _, attn_output_weight_logits = self.self_attn(q, k, value=v, attn_mask=src_mask,
                                                             key_padding_mask=src_key_padding_mask,
                                                             need_weights=True, average_attn_weights=False)
 
-        if sgdt.args.token_masking and sgdt.args.token_masking_loc == 'MHA-out':
-            src2 = get_token_gt_masking(
-                src=src2, token_masking=sgdt.args.token_masking,
-                src_key_padding_mask=src_key_padding_mask, pos=pos, sgdt=sgdt)
-
-        # src = sgdt_output['x'] + self.dropout1(src2)
         src = src + self.dropout1(src2)
         src = self.norm1(src)
-
-        if sgdt.args.token_masking and sgdt.args.token_masking_loc == 'MHA-feature':
-            src = get_token_gt_masking(
-                src=src, token_masking=sgdt.args.token_masking,
-                src_key_padding_mask=src_key_padding_mask, pos=pos, sgdt=sgdt)
-
         src2 = self.linear2(self.dropout(self.activation(self.linear1(src))))
-
-        if sgdt.args.token_masking and sgdt.args.token_masking_loc == 'FFN-out':
-            src2 = get_token_gt_masking(
-                src=src2, token_masking=sgdt.args.token_masking,
-                src_key_padding_mask=src_key_padding_mask, pos=pos, sgdt=sgdt)
-
         src = src + self.dropout2(src2)
         src = self.norm2(src)
 
-        if sgdt.args.token_masking and sgdt.args.token_masking_loc == 'FFN-feature':
-            src = get_token_gt_masking(
-                src=src, token_masking=sgdt.args.token_masking,
-                src_key_padding_mask=src_key_padding_mask, pos=pos, sgdt=sgdt)
+        # ---------------
+
+        if marking_encoder_layer_fg1_bg0 == 'FFN_Out':
+            src = mark_encoder_feature_by_fg_gt(src, sgdt)
 
         return src, attn_output_weight_logits
 
 
-class NotDebuggedTransformerEncoderSharedSelfAttnLayer(TransformerEncoderLayer):
+class TransformerEncoderRandomMarkFgBgLayer(TransformerEncoderLayer):
+    # Q from adapted tokens, k, v from original token
+
+    def forward(self,
+                src,
+                src_mask: Optional[Tensor] = None,
+                src_key_padding_mask: Optional[Tensor] = None,
+                pos: Optional[Tensor] = None,
+                sgdt=None,
+                ):
+        # ---------------
+        marking_encoder_layer_fg1_bg0 = None
+        if sgdt is not None and sgdt.marking_encoder_layer_fg1_bg0:
+            marking_encoder_layer_fg1_bg0 = sgdt.marking_encoder_layer_fg1_bg0
+
+        q = self.with_pos_embed(src, pos)
+        # ---------------
+
+        k, v = q.clone(), src.clone()
+
+        mark_flag = False
+        if self.training:
+            randomly_mark_fg1_bg0_prob = sgdt.args.randomly_mark_fg1_bg0_prob
+            prob = np.random.uniform()
+            if randomly_mark_fg1_bg0_prob is not None and isinstance(randomly_mark_fg1_bg0_prob, (float, int)) \
+                    and prob < randomly_mark_fg1_bg0_prob:
+                pass
+            else:
+                mark_flag = True
+        else:
+            if sgdt.args.eval_randomly_mark_fg1_bg0 != 'no_mark':  # always mark in the evaluation
+                mark_flag = True
+
+        if mark_flag:
+            if marking_encoder_layer_fg1_bg0 == 'K':
+                k = mark_encoder_feature_by_fg_gt(k, sgdt)
+            elif marking_encoder_layer_fg1_bg0 == 'V':
+                v = mark_encoder_feature_by_fg_gt(v, sgdt)
+            elif marking_encoder_layer_fg1_bg0 == 'Q':
+                q = mark_encoder_feature_by_fg_gt(q, sgdt)
+
+        src2, _, attn_output_weight_logits = self.self_attn(q, k, value=v, attn_mask=src_mask,
+                                                            key_padding_mask=src_key_padding_mask,
+                                                            need_weights=True, average_attn_weights=False)
+
+        src = src + self.dropout1(src2)
+        src = self.norm1(src)
+        src2 = self.linear2(self.dropout(self.activation(self.linear1(src))))
+        src = src + self.dropout2(src2)
+        src = self.norm2(src)
+
+        # ---------------
+        if mark_flag and marking_encoder_layer_fg1_bg0 == 'FFN_Out':
+            src = mark_encoder_feature_by_fg_gt(src, sgdt)
+
+        return src, attn_output_weight_logits
+
+
+class TransformerEncoderSGDTLayer(TransformerEncoderLayer):
+    # Q from adapted tokens, k, v from original token
+
+    def forward(self,
+                src,
+                src_mask: Optional[Tensor] = None,
+                src_key_padding_mask: Optional[Tensor] = None,
+                pos: Optional[Tensor] = None,
+
+                sgdt=None,
+                # sgdt_targets=None,
+                # feat_map_size=None,  # feat_map_size = (h, w)
+                # sigma=None,
+                ):
+        """
+
+        Args:
+            sgdt:
+            src:
+            src_mask:  attention mask.
+            src_key_padding_mask:
+            pos:
+
+        Returns:
+
+        """
+        # here q, k from different source. # -----
+        # q = k = self.with_pos_embed(src, pos)
+        k = self.with_pos_embed(src, pos)  # k, v are from the original tokens.
+        # ------------------------
+        sgdt_output = sgdt(x=src, mask=src_key_padding_mask,
+                           # sgdt_targets=sgdt_targets,
+                           # feat_map_size=feat_map_size,  # feat_map_size = (h, w)
+                           # sigma=sigma,
+                           # reclaim_padded_region=self.reclaim_padded_region
+                           )  # torch.Size([630, 2, 256]),torch.Size([2, 630])
+
+        # # ################################### wrong version
+        # # important modification here, we use adapted_token_dict as q_dict, so
+        # # short path should be adapted_token_dict instead of the original token_dict (kv_dict)
+        # # value should not be orignal src, but the adapted tokens.
+        # src = sgdt_output['x']
+        #
+        # q_adapted_pos = extract_adapted_token_pos_embed(adapted_token_dict=sgdt_output, pos=pos)
+        # q = self.with_pos_embed(src, pos=q_adapted_pos)  # using adapted tokens as queries
+        #
+        # # tcformer_layers.py forward(self, q_dict, kv_dict): so k v should from the same src.
+        # #  but here we q, v are from the same src.
+        # src2 = self.self_attn(q, k, value=src, attn_mask=src_mask,
+        #                       key_padding_mask=src_key_padding_mask)[0]
+        # src = src + self.dropout1(src2)
+        #
+        # src = self.norm1(src)
+        # # ###################################
+
+        # q_adapted_pos = extract_adapted_token_pos_embed(adapted_token_dict=sgdt_output, pos=pos)
+        q_adapted_pos = pos
+        q = self.with_pos_embed(sgdt_output['x'], pos=q_adapted_pos)  # using adapted tokens as queries
+
+        # # tcformer_layers.py forward(self, q_dict, kv_dict): so k v should come from the same src.
+        # #  but here we q, v are from the same src, because the attention means the attention to the key
+        # # Do not update src_key_padding_mask here, because k, v tokens are not adapted, adaption of q tokens will
+        # # will not affect the key_padding_mask.
+        # src2 = self.self_attn(q, k, value=src, attn_mask=src_mask,
+        #                       key_padding_mask=src_key_padding_mask)[0]
+
+        src2, _, attn_output_weight_logits = self.self_attn(q, k, value=src, attn_mask=src_mask,
+                                                            key_padding_mask=src_key_padding_mask,
+                                                            need_weights=True, average_attn_weights=False)  #
+
+        # check if I need to use 'src' or sgdt_output['x'] (maybe TCformer used sgdt_output['x']?),
+        # confirmed: TCformer used sgdt_output['x'] as the short path, i.e., use down_dict as src from
+        # (down_dict, token_dict)
+        # If use 'src' same as in SGDTV1, then the pos of the the tokens in 'src' and 'self.dropout1(src2)
+        # are not consistent due the token adaption, so I should use sgdt_output['x']
+        src = sgdt_output['x'] + self.dropout1(src2)
+
+        # TODO: I should use [based on the identity mapping]:
+        #  src = src + self.dropout1(src2)
+
+        src = self.norm1(src)
+        # TODO: replace with dwconv as in TCFormer
+        src2 = self.linear2(self.dropout(self.activation(self.linear1(src))))
+
+        src = src + self.dropout2(src2)
+        src = self.norm2(src)
+
+        # Pass the related infor of sgdt module for loss calculation and pos adaption.
+        # The input pos is the scaled pos, not the original pos, so we do not pass q_adapted_pos
+        # out, but just return a flag saying that the original pos should be adapted outside this
+        # function with the original pos..
+        # sgdt_output.update(dict(adapted_pos=True))
+        sgdt_output.update(dict(adapted_pos=False))
+
+        # src_key_padding_mask can be safely updated here.
+        # ** ATTENTION **, if this section is put in Transformer, we should update 'mask',
+        # i.e., mask = sgdt_output['src_mask_reclaimed']
+        # but if it is inside TransformerEncoder, we should update the 'src_key_padding_mask'.
+        assert 'src_mask_reclaimed' in sgdt_output and sgdt_output['src_mask_reclaimed'] is not None
+        src_key_padding_mask = sgdt_output['src_mask_reclaimed']
+
+        return src, attn_output_weight_logits, sgdt_output, src_key_padding_mask
+
+
+class TransformerEncoderSGDTLayerV0NoMaskUpdate(TransformerEncoderSGDTLayer):
+    # Q from adapted tokens, k, v from original token
+
+    def forward(self,
+                src,
+                src_mask: Optional[Tensor] = None,
+                src_key_padding_mask: Optional[Tensor] = None,
+                pos: Optional[Tensor] = None,
+
+                sgdt=None,
+                # sgdt_targets=None,
+                # feat_map_size=None,  # feat_map_size = (h, w)
+                # sigma=None,
+                ):
+        """
+
+        Args:
+            sgdt:
+            src:
+            src_mask:  attention mask.
+            src_key_padding_mask:
+            pos:
+
+        Returns:
+
+        """
+        # here q, k from different source. # -----
+        # q = k = self.with_pos_embed(src, pos)
+        # do not update src_key_padding_mask in this version
+        src, attn_output_weight_logits, sgdt_output, _ = super().forward(
+            src=src, src_mask=src_mask,
+            src_key_padding_mask=src_key_padding_mask, pos=pos, sgdt=sgdt
+        )
+        return src, attn_output_weight_logits, sgdt_output, src_key_padding_mask
+
+
+class TransformerEncoderSGDTLayerV1(TransformerEncoderSGDTLayer):
+    # Q from original token, k, v from adapted tokens.
+
+    def forward(self,
+                src,
+                src_mask: Optional[Tensor] = None,
+                src_key_padding_mask: Optional[Tensor] = None,
+                pos: Optional[Tensor] = None,
+                sgdt=None,
+                ):
+        """
+        2022-10-3 fixed two bugs, 1) v to be same with updated k, 2) src_mask_reclaimed set to None (mask should not
+        be updated in decoder).
+        Args:
+            sgdt:
+            src:
+            src_mask:  attention mask.
+            src_key_padding_mask:
+            pos:
+
+        Returns:
+        # generate attention mask to disable the split two tokens to see each other.
+        # Suppose Token k is split to k1, k2; J is split to J1 and J2, then k1 should not see k2, J1 should
+        # not see J2, but k1 can see J1, J2, as they represent different spatial locations.
+
+        - attn_mask: 2D mask :math:`(L, S)` where L is the target sequence length, S is the source sequence length.
+          3D mask :math:`(N*num_heads, L, S)` where N is the batch size, L is the target sequence length,
+          S is the source sequence length. attn_mask ensure that position i is allowed to attend the unmasked
+          positions. If a ByteTensor is provided, the non-zero positions are not allowed to attend
+          while the zero positions will be unchanged. If a BoolTensor is provided, positions with ``True``
+          is not allowed to attend while ``False`` values will be unchanged. If a FloatTensor
+          is provided, it will be added to the attention weight.
+
+        if attn_mask is None:
+            attn_mask = key_padding_mask
+        elif attn_mask.dtype == torch.bool:
+            attn_mask = attn_mask.logical_or(key_padding_mask)
+        else:
+            attn_mask = attn_mask.masked_fill(key_padding_mask, float("-inf"))
+
+        """
+        # here q, k from different source. # -----
+        # q = k = self.with_pos_embed(src, pos
+        q = self.with_pos_embed(src, pos)  # k, v are from the original tokens.
+        sgdt_output = sgdt(x=src, mask=src_key_padding_mask,
+                           # sgdt_targets=sgdt_targets,
+                           # feat_map_size=feat_map_size,  # (h, w)
+                           # sigma=sigma,
+                           )
+        # TODO: update this to make it more compilable.
+        # k_adapted_pos = extract_adapted_token_pos_embed(
+        #     adapted_token_dict=sgdt_output, pos=pos)
+        k_adapted_pos = pos
+        k = self.with_pos_embed(sgdt_output['x'], pos=k_adapted_pos)
+
+        # src2 = self.self_attn(q, k, value=src, attn_mask=src_mask,
+        #                       key_padding_mask=src_key_padding_mask)[0]
+
+        # 1. value is not src anymore, as k has been updated.
+        # 2. some tokens are reclaimed so they are not invalid tokens any more, we need to
+        # adapt the invalid token mask as well.
+        assert 'src_mask_reclaimed' in sgdt_output and sgdt_output['src_mask_reclaimed'] is not None
+        # src2 = self.self_attn(q, k, value=sgdt_output['x'], attn_mask=src_mask,
+        #                       key_padding_mask=sgdt_output['src_mask_reclaimed'])[0]
+
+        src2, _, attn_output_weight_logits = self.self_attn(q, k, value=sgdt_output['x'], attn_mask=src_mask,
+                                                            key_padding_mask=sgdt_output['src_mask_reclaimed'],
+                                                            need_weights=True, average_attn_weights=False)  #
+
+        src = src + self.dropout1(src2)
+
+        src = self.norm1(src)
+        # TODO: replace with dwconv as in TCFormer
+        src2 = self.linear2(self.dropout(self.activation(self.linear1(src))))
+
+        src = src + self.dropout2(src2)
+        src = self.norm2(src)
+
+        # k_adapted_pos is not used for self-attention inside the encoder layer,
+        # should not be used outside Encoder layer
+        sgdt_output.update(dict(adapted_pos=False))
+
+        # the src_mask_reclaimed should not be used outside this encoder layer to update src_key_padding_mask,
+        # as query is not updated (the update of k, v will not change the src_key_padding_mask).
+        # I should not update the key padding mask here by src_key_padding_mask = sgdt_output['src_mask_reclaimed']
+        # because it will not be used outside the sgdt layer
+
+        return src, attn_output_weight_logits, sgdt_output, src_key_padding_mask
+
+
+class TransformerEncoderSGDTLayerUpdateK(TransformerEncoderSGDTLayerV1):
+    # Q from original token, k, v from adapted tokens.
+
+    def forward(self,
+                src,
+                src_mask: Optional[Tensor] = None,
+                src_key_padding_mask: Optional[Tensor] = None,
+                pos: Optional[Tensor] = None,
+                sgdt=None,
+                ):
+        q = self.with_pos_embed(src, pos)  # k, v are from the original tokens.
+        sgdt_output = sgdt(x=src, mask=src_key_padding_mask)
+        k_adapted_pos = pos
+        k = self.with_pos_embed(sgdt_output['x'], pos=k_adapted_pos)
+        assert 'src_mask_reclaimed' in sgdt_output and sgdt_output['src_mask_reclaimed'] is not None
+
+        # ################################################ only modification here
+        # not update k
+        # src2, _, attn_output_weight_logits = self.self_attn(q, k, value=sgdt_output['x'], attn_mask=src_mask,
+        #                                            key_padding_mask=sgdt_output['src_mask_reclaimed'],
+        #                                            need_weights=True, average_attn_weights=False)  #
+
+        src2, _, attn_output_weight_logits = self.self_attn(q, k, value=src, attn_mask=src_mask,
+                                                            key_padding_mask=sgdt_output['src_mask_reclaimed'],
+                                                            need_weights=True, average_attn_weights=False)
+        # ################################################
+
+        src = src + self.dropout1(src2)
+        src = self.norm1(src)
+        src2 = self.linear2(self.dropout(self.activation(self.linear1(src))))
+
+        src = src + self.dropout2(src2)
+        src = self.norm2(src)
+
+        # k_adapted_pos is not used for self-attention inside the encoder layer,
+        # should not be used outside Encoder layer
+        sgdt_output.update(dict(adapted_pos=False))
+
+        return src, attn_output_weight_logits, sgdt_output, src_key_padding_mask
+
+
+class TransformerEncoderSGDTLayerUpdateQK(TransformerEncoderSGDTLayerV1):
+    # Q from original token, k, v from adapted tokens.
+
+    def forward(self,
+                src,
+                src_mask: Optional[Tensor] = None,
+                src_key_padding_mask: Optional[Tensor] = None,
+                pos: Optional[Tensor] = None,
+                sgdt=None,
+                ):
+        # q = self.with_pos_embed(src, pos)  # k, v are from the original tokens.
+        sgdt_output = sgdt(x=src, mask=src_key_padding_mask)
+        k_adapted_pos = pos
+        q = k = self.with_pos_embed(sgdt_output['x'], pos=k_adapted_pos)
+        assert 'src_mask_reclaimed' in sgdt_output and sgdt_output['src_mask_reclaimed'] is not None
+
+        # ################################################ only modification here
+        # not update k
+        # src2, _, attn_output_weight_logits = self.self_attn(q, k, value=sgdt_output['x'], attn_mask=src_mask,
+        #                                            key_padding_mask=sgdt_output['src_mask_reclaimed'],
+        #                                            need_weights=True, average_attn_weights=False)  #
+
+        src2, _, attn_output_weight_logits = self.self_attn(q, k, value=src, attn_mask=src_mask,
+                                                            key_padding_mask=sgdt_output['src_mask_reclaimed'],
+                                                            need_weights=True, average_attn_weights=False)
+        # ################################################
+
+        src = src + self.dropout1(src2)
+        src = self.norm1(src)
+        src2 = self.linear2(self.dropout(self.activation(self.linear1(src))))
+
+        src = src + self.dropout2(src2)
+        src = self.norm2(src)
+
+        # k_adapted_pos is not used for self-attention inside the encoder layer,
+        # should not be used outside Encoder layer
+        sgdt_output.update(dict(adapted_pos=False))
+
+        return src, attn_output_weight_logits, sgdt_output, src_key_padding_mask
+
+
+class TransformerEncoderSGDTLayerUpdateV(TransformerEncoderSGDTLayerV1):
+    # Q from original token, k, v from adapted tokens.
+
+    def forward(self,
+                src,
+                src_mask: Optional[Tensor] = None,
+                src_key_padding_mask: Optional[Tensor] = None,
+                pos: Optional[Tensor] = None,
+                sgdt=None,
+                ):
+        # ################################################   not update q, k, only update v.
+        q = k = self.with_pos_embed(src, pos)
+        sgdt_output = sgdt(x=src, mask=src_key_padding_mask)
+        # k_adapted_pos = pos
+        # k = self.with_pos_embed(sgdt_output['x'], pos=k_adapted_pos)
+        # assert 'src_mask_reclaimed' in sgdt_output and sgdt_output['src_mask_reclaimed'] is not None
+
+        # src2, _, attn_output_weight_logits = self.self_attn(q, k, value=sgdt_output['x'], attn_mask=src_mask,
+        #                                            key_padding_mask=sgdt_output['src_mask_reclaimed'],
+        #                                            need_weights=True, average_attn_weights=False)  #
+
+        src2, _, attn_output_weight_logits = self.self_attn(q, k, value=sgdt_output['x'], attn_mask=src_mask,
+                                                            key_padding_mask=src_key_padding_mask,
+                                                            need_weights=True, average_attn_weights=False)
+        # ################################################
+
+        src = src + self.dropout1(src2)
+        src = self.norm1(src)
+        src2 = self.linear2(self.dropout(self.activation(self.linear1(src))))
+
+        src = src + self.dropout2(src2)
+        src = self.norm2(src)
+
+        # k_adapted_pos is not used for self-attention inside the encoder layer,
+        # should not be used outside Encoder layer
+        sgdt_output.update(dict(adapted_pos=False))
+
+        return src, attn_output_weight_logits, sgdt_output, src_key_padding_mask
+
+
+class TransformerEncoderSGDTLayerUpdateMHAOut(TransformerEncoderSGDTLayerV1):
+    # Q from original token, k, v from adapted tokens.
+
+    def forward(self,
+                src,
+                src_mask: Optional[Tensor] = None,
+                src_key_padding_mask: Optional[Tensor] = None,
+                pos: Optional[Tensor] = None,
+                sgdt=None,
+                ):
+        q = k = self.with_pos_embed(src, pos)
+        # src2 = self.self_attn(q, k, value=src, attn_mask=src_mask,
+        #                       key_padding_mask=src_key_padding_mask)[0]
+
+        src2, _, attn_output_weight_logits = self.self_attn(q, k, value=src, attn_mask=src_mask,
+                                                            key_padding_mask=src_key_padding_mask,
+                                                            need_weights=True, average_attn_weights=False)  #
+
+        # =================-
+        # update the MHA-out
+        sgdt_output = sgdt(x=src2, mask=src_key_padding_mask)
+        src2 = sgdt_output['x']
+        # =================-
+
+        src = src + self.dropout1(src2)
+        src = self.norm1(src)
+
+        src2 = self.linear2(self.dropout(self.activation(self.linear1(src))))
+        src = src + self.dropout2(src2)
+        src = self.norm2(src)
+
+        # # k_adapted_pos is not used for self-attention inside the encoder layer,
+        # # should not be used outside Encoder layer
+        sgdt_output.update(dict(adapted_pos=False))
+
+        return src, attn_output_weight_logits, sgdt_output, src_key_padding_mask
+
+
+class TransformerEncoderSGDTLayerUpdateMHAFeature(TransformerEncoderSGDTLayerV1):
+    # Q from original token, k, v from adapted tokens.
+
+    def forward(self,
+                src,
+                src_mask: Optional[Tensor] = None,
+                src_key_padding_mask: Optional[Tensor] = None,
+                pos: Optional[Tensor] = None,
+                sgdt=None,
+                ):
+        q = k = self.with_pos_embed(src, pos)
+        # src2 = self.self_attn(q, k, value=src, attn_mask=src_mask,
+        #                       key_padding_mask=src_key_padding_mask)[0]
+
+        src2, _, attn_output_weight_logits = self.self_attn(q, k, value=src, attn_mask=src_mask,
+                                                            key_padding_mask=src_key_padding_mask,
+                                                            need_weights=True, average_attn_weights=False)  #
+
+        src = src + self.dropout1(src2)
+        src = self.norm1(src)
+
+        # =================-
+        # # update the MHA-out
+        sgdt_output = sgdt(x=src, mask=src_key_padding_mask)
+        src = sgdt_output['x']
+        # =================-
+
+        src2 = self.linear2(self.dropout(self.activation(self.linear1(src))))
+        src = src + self.dropout2(src2)
+        src = self.norm2(src)
+
+        # # k_adapted_pos is not used for self-attention inside the encoder layer,
+        # # should not be used outside Encoder layer
+        sgdt_output.update(dict(adapted_pos=False))
+
+        return src, attn_output_weight_logits, sgdt_output, src_key_padding_mask
+
+
+class TransformerEncoderSGDTLayerUpdateFFNOut(TransformerEncoderSGDTLayerV1):
+    # Q from original token, k, v from adapted tokens.
+
+    def forward(self,
+                src,
+                src_mask: Optional[Tensor] = None,
+                src_key_padding_mask: Optional[Tensor] = None,
+                pos: Optional[Tensor] = None,
+                sgdt=None,
+                ):
+        q = k = self.with_pos_embed(src, pos)
+        # src2 = self.self_attn(q, k, value=src, attn_mask=src_mask,
+        #                       key_padding_mask=src_key_padding_mask)[0]
+
+        src2, _, attn_output_weight_logits = self.self_attn(q, k, value=src, attn_mask=src_mask,
+                                                            key_padding_mask=src_key_padding_mask,
+                                                            need_weights=True, average_attn_weights=False)  #
+
+        src = src + self.dropout1(src2)
+        src = self.norm1(src)
+
+        src2 = self.linear2(self.dropout(self.activation(self.linear1(src))))
+
+        # =================-
+        # # update the FFN-out
+        sgdt_output = sgdt(x=src2, mask=src_key_padding_mask)
+        src2 = sgdt_output['x']
+        # =================-
+
+        src = src + self.dropout2(src2)
+        src = self.norm2(src)
+
+        # # k_adapted_pos is not used for self-attention inside the encoder layer,
+        # # should not be used outside Encoder layer
+        sgdt_output.update(dict(adapted_pos=False))
+
+        return src, attn_output_weight_logits, sgdt_output, src_key_padding_mask
+
+
+class TransformerEncoderSGDTLayerUpdateFFNFeature(TransformerEncoderSGDTLayerV1):
+    # Q from original token, k, v from adapted tokens.
+
+    def forward(self,
+                src,
+                src_mask: Optional[Tensor] = None,
+                src_key_padding_mask: Optional[Tensor] = None,
+                pos: Optional[Tensor] = None,
+                sgdt=None,
+                ):
+        q = k = self.with_pos_embed(src, pos)
+        # src2 = self.self_attn(q, k, value=src, attn_mask=src_mask,
+        #                       key_padding_mask=src_key_padding_mask)[0]
+
+        src2, _, attn_output_weight_logits = self.self_attn(q, k, value=src, attn_mask=src_mask,
+                                                            key_padding_mask=src_key_padding_mask,
+                                                            need_weights=True, average_attn_weights=False)  #
+
+        src = src + self.dropout1(src2)
+        src = self.norm1(src)
+
+        src2 = self.linear2(self.dropout(self.activation(self.linear1(src))))
+        src = src + self.dropout2(src2)
+        src = self.norm2(src)
+
+        # =================-
+        # # update the FFN-features
+        sgdt_output = sgdt(x=src, mask=src_key_padding_mask)
+        src = sgdt_output['x']
+        # =================-
+
+        # # k_adapted_pos is not used for self-attention inside the encoder layer,
+        # # should not be used outside Encoder layer
+        sgdt_output.update(dict(adapted_pos=False))
+
+        return src, attn_output_weight_logits, sgdt_output, src_key_padding_mask
+
+
+class TransformerEncoderSGDTLayerUpdateQKV(TransformerEncoderSGDTLayerV1):
+    # Q from original token, k, v from adapted tokens.
+
+    def forward(self,
+                src,
+                src_mask: Optional[Tensor] = None,
+                src_key_padding_mask: Optional[Tensor] = None,
+                pos: Optional[Tensor] = None,
+                sgdt=None,
+                ):
+        # =================-
+        # # update the input
+        sgdt_output = sgdt(x=src, mask=src_key_padding_mask)
+        src = sgdt_output['x']
+        # =================-
+
+        q = k = self.with_pos_embed(src, pos)
+        # src2 = self.self_attn(q, k, value=src, attn_mask=src_mask,
+        #                       key_padding_mask=src_key_padding_mask)[0]
+
+        src2, _, attn_output_weight_logits = self.self_attn(q, k, value=src, attn_mask=src_mask,
+                                                            key_padding_mask=src_key_padding_mask,
+                                                            need_weights=True, average_attn_weights=False)  #
+
+        src = src + self.dropout1(src2)
+        src = self.norm1(src)
+
+        src2 = self.linear2(self.dropout(self.activation(self.linear1(src))))
+        src = src + self.dropout2(src2)
+        src = self.norm2(src)
+
+        # # k_adapted_pos is not used for self-attention inside the encoder layer,
+        # # should not be used outside Encoder layer
+        sgdt_output.update(dict(adapted_pos=False))
+
+        return src, attn_output_weight_logits, sgdt_output, src_key_padding_mask
+
+
+class TransformerEncoderSharedSelfAttnLayer(TransformerEncoderLayer):
     # used pre_calculated_attn from outside
 
     def __init__(self, d_model, nhead, dim_feedforward=2048, dropout=0.1,
@@ -266,9 +796,7 @@ class NotDebuggedTransformerEncoderSharedSelfAttnLayer(TransformerEncoderLayer):
 
         # update the self_attn
         del self.self_attn
-        self.self_attn = MultiheadAttention(
-            d_model, nhead, dropout=dropout, share_attn_map=True,
-        )
+        self.self_attn = MultiheadAttentionExtended(d_model, nhead, dropout=dropout)
 
     def forward(self,
                 src,
@@ -284,13 +812,15 @@ class NotDebuggedTransformerEncoderSharedSelfAttnLayer(TransformerEncoderLayer):
         #                       key_padding_mask=src_key_padding_mask)[0]
 
         #  need_weights=True, average_attn_weights=False
-        # attn_output_weight_logits : (b, num_heads, N, N)  torch.Size([2,8, 888, 888])
-        # (bsz, num_heads, tgt_len, src_len)
+        # attn_output_weight_logits : (b, num_heads, N, N)  torch.Size([2,8, 888, 888]) (bsz, num_heads, tgt_len, src_len)
         src2, _, attn_output_weight_logits = self.self_attn(
             q, k, value=src, attn_mask=src_mask,
             key_padding_mask=src_key_padding_mask,
             need_weights=True, average_attn_weights=False,
-            attn_map_shared=pre_calculated_attn,  # torch.Size([2, 8, 696, 696])
+            # use pre_calculated_attn
+            pre_calculated_attn=pre_calculated_attn,  # torch.Size([2, 8, 696, 696])
+            freeze_wq=True,
+            freeze_wk=True,
         )
 
         src = src + self.dropout1(src2)
@@ -301,68 +831,108 @@ class NotDebuggedTransformerEncoderSharedSelfAttnLayer(TransformerEncoderLayer):
         return src, attn_output_weight_logits
 
 
-#
-# class TransformerEncoderDualAttnShareVLayer(TransformerEncoderLayer):
-#
-#     def __init__(self, d_model, nhead, dim_feedforward=2048, dropout=0.1,
-#                  activation="relu", normalize_before=False):
-#         super().__init__(d_model=d_model, nhead=nhead, dim_feedforward=dim_feedforward,
-#                          dropout=dropout, activation=activation, normalize_before=normalize_before)
-#
-#         # update the self_attn
-#         del self.self_attn
-#         # self.self_attn = MultiheadAttentionExtended(d_model, nhead, dropout=dropout)
-#
-#         self.self_attn = MultiheadAttentionShareV(d_model, nhead, dropout=dropout,
-#                                                   )
-#
-#         self.teacher_encoder_layer = _TransformerEncoderLayerFFNOnly(
-#             d_model=d_model, dim_feedforward=dim_feedforward,
-#             dropout=dropout, activation=activation,
-#             normalize_before=normalize_before)
-#
-#     def forward(self,
-#                 src,
-#                 src_mask: Optional[Tensor] = None,
-#                 src_key_padding_mask: Optional[Tensor] = None,
-#                 pos: Optional[Tensor] = None,
-#                 sgdt=None,
-#                 # pre_calculated_attn: Optional[Tensor] = None,
-#                 ):
-#         q = k = self.with_pos_embed(src, pos)
-#
-#         # src2 = self.self_attn(q, k, value=src, attn_mask=src_mask,
-#         #                       key_padding_mask=src_key_padding_mask)[0]
-#
-#         #  need_weights=True, average_attn_weights=False
-#         # attn_output_weight_logits : (b, num_heads, N, N)  torch.Size([2,8, 888, 888]) (bsz, num_heads, tgt_len, src_len)
-#         # no backpropagation for X
-#         k_teacher = mark_encoder_feature_by_fg_gt(k.clone().detach(), sgdt)
-#
-#         # Why use q.clone()?
-#         src2_s_t_tuple, _, attn_output_weight_logits_s_t_tuple = self.self_attn(
-#             q, k, value=src, query_teacher=q.clone(), key_teacher=k_teacher,
-#             attn_mask=src_mask,
-#             key_padding_mask=src_key_padding_mask,
-#             need_weights=True, average_attn_weights=False,
-#             # use pre_calculated_attn
-#             # pre_calculated_attn=pre_calculated_attn,  # torch.Size([2, 8, 696, 696])
-#             # freeze_wq=True,
-#             # freeze_wk=True,
-#         )
-#         src2, src2_teacher = src2_s_t_tuple
-#         attn_map_logits, attn_output_weight_logits_teacher = attn_output_weight_logits_s_t_tuple
-#         src_teacher = self.teacher_encoder_layer(
-#             src=src,  # src.detach().clone(),
-#             mha_out=src2_teacher,  # mha_out
-#         )
-#         src = self.ffn_from_mha_out(src=src, mha_out=src2)
-#
-#         # return (src, src_teacher), attn_output_weight_logits_s_t_tuple
-#         return src, attn_map_logits, src_teacher, attn_output_weight_logits_teacher
+class TransformerEncoderSGDTLayerUpdateKExtendedSelfAttn(TransformerEncoderSharedSelfAttnLayer):
+    # q, v from original token, k from adapted tokens.
+    # Old name: TransformerEncoderSGDTLayerV1ExtendedSelfAttn
+
+    def forward(self,
+                src,
+                src_mask: Optional[Tensor] = None,
+                src_key_padding_mask: Optional[Tensor] = None,
+                pos: Optional[Tensor] = None,
+                sgdt=None,
+                ):
+        """
+        2022-10-3 fixed two bugs, 1) v to be same with updated k, 2) src_mask_reclaimed set to None (mask should not
+        be updated in decoder).
+        Args:
+            sgdt:
+            src:
+            src_mask:  attention mask.
+            src_key_padding_mask:
+            pos:
+
+        Returns:
+        # generate attention mask to disable the split two tokens to see each other.
+        # Suppose Token k is split to k1, k2; J is split to J1 and J2, then k1 should not see k2, J1 should
+        # not see J2, but k1 can see J1, J2, as they represent different spatial locations.
+
+        - attn_mask: 2D mask :math:`(L, S)` where L is the target sequence length, S is the source sequence length.
+          3D mask :math:`(N*num_heads, L, S)` where N is the batch size, L is the target sequence length,
+          S is the source sequence length. attn_mask ensure that position i is allowed to attend the unmasked
+          positions. If a ByteTensor is provided, the non-zero positions are not allowed to attend
+          while the zero positions will be unchanged. If a BoolTensor is provided, positions with ``True``
+          is not allowed to attend while ``False`` values will be unchanged. If a FloatTensor
+          is provided, it will be added to the attention weight.
+
+        if attn_mask is None:
+            attn_mask = key_padding_mask
+        elif attn_mask.dtype == torch.bool:
+            attn_mask = attn_mask.logical_or(key_padding_mask)
+        else:
+            attn_mask = attn_mask.masked_fill(key_padding_mask, float("-inf"))
+
+        """
+        # here q, k from different source. # -----
+        # q = k = self.with_pos_embed(src, pos
+        q = self.with_pos_embed(src, pos)  # k, v are from the original tokens.
+        sgdt_output = sgdt(x=src, mask=src_key_padding_mask,
+                           # sgdt_targets=sgdt_targets,
+                           # feat_map_size=feat_map_size,  # (h, w)
+                           # sigma=sigma,
+                           )
+        # TODO: update this to make it more compilable.
+        # k_adapted_pos = extract_adapted_token_pos_embed(
+        #     adapted_token_dict=sgdt_output, pos=pos)
+        k_adapted_pos = pos
+        k = self.with_pos_embed(sgdt_output['x'], pos=k_adapted_pos)
+
+        # src2 = self.self_attn(q, k, value=src, attn_mask=src_mask,
+        #                       key_padding_mask=src_key_padding_mask)[0]
+
+        # 1. value is not src anymore, as k has been updated.
+        # 2. some tokens are reclaimed so they are not invalid tokens any more, we need to
+        # adapt the invalid token mask as well.
+        assert 'src_mask_reclaimed' in sgdt_output and sgdt_output['src_mask_reclaimed'] is not None
+        # src2 = self.self_attn(q, k, value=sgdt_output['x'], attn_mask=src_mask,
+        #                       key_padding_mask=sgdt_output['src_mask_reclaimed'])[0]
+
+        # src2, _, attn_output_weight_logits = self.self_attn(q, k, value=sgdt_output['x'], attn_mask=src_mask,
+        #                                            key_padding_mask=sgdt_output['src_mask_reclaimed'],
+        #                                            need_weights=True, average_attn_weights=False)  #
+
+        src2, _, attn_output_weight_logits = self.self_attn(
+            q, k, value=src, attn_mask=src_mask,
+            key_padding_mask=src_key_padding_mask,
+            need_weights=True, average_attn_weights=False,
+            # freeze the softmax.
+            freeze_wq=True,
+            freeze_wk=True,
+        )
+
+        src = src + self.dropout1(src2)
+
+        src = self.norm1(src)
+        # TODO: replace with dwconv as in TCFormer
+        src2 = self.linear2(self.dropout(self.activation(self.linear1(src))))
+
+        src = src + self.dropout2(src2)
+        src = self.norm2(src)
+
+        # k_adapted_pos is not used for self-attention inside the encoder layer,
+        # should not be used outside Encoder layer
+        sgdt_output.update(dict(adapted_pos=False))
+
+        # the src_mask_reclaimed should not be used outside this encoder layer to update src_key_padding_mask,
+        # as query is not updated (the update of k, v will not change the src_key_padding_mask).
+        # I should not update the key padding mask here by src_key_padding_mask = sgdt_output['src_mask_reclaimed']
+        # because it will not be used outside the sgdt layer
+
+        return src, attn_output_weight_logits, sgdt_output, src_key_padding_mask
 
 
-class TransformerEncoderDualAttnLayerShareVOutProjFFN(TransformerEncoderLayer):
+class TransformerEncoderLayerSTMarkFgBgShareQVFreezeAllExceptWK(TransformerEncoderLayer):
+    #
 
     def __init__(self, d_model, nhead, dim_feedforward=2048, dropout=0.1,
                  activation="relu", normalize_before=False):
@@ -372,229 +942,452 @@ class TransformerEncoderDualAttnLayerShareVOutProjFFN(TransformerEncoderLayer):
         # update the self_attn
         del self.self_attn
         # self.self_attn = MultiheadAttentionExtended(d_model, nhead, dropout=dropout)
-        self.self_attn = MultiheadDualAttention(
-            d_model, nhead, dropout=dropout,
-            share_v=True, share_out_proj_weight=True,
-        )
 
-    def forward_attn(self,
-                     src,
-                     src_mask: Optional[Tensor] = None,
-                     src_key_padding_mask: Optional[Tensor] = None,
-                     pos: Optional[Tensor] = None,
-                     sgdt=None,
-                     ):
-        # student
-        q = k = with_pos_embed(src, pos)
-        # v = src  # This is a big bug as the two self-attn will interact with each other when src is again passed  to
-        # the teacher branch. src -> v -> (q_teacher, k_teacher, v_teacher)
-        q_teacher, k_teacher, v_teacher = get_self_attn_q_k_v(
-            src=src, pos=pos, src_key_padding_mask=src_key_padding_mask, sgdt=sgdt, )
+        self.self_attn = MultiheadAttentionShareQV(d_model, nhead, dropout=dropout)
 
+        self.teacher_encoder_layer = _TransformerEncoderLayerFFNOnly(
+            d_model=d_model, dim_feedforward=dim_feedforward,
+            dropout=dropout, activation=activation,
+            normalize_before=normalize_before)
+
+    def forward(self,
+                src,
+                src_mask: Optional[Tensor] = None,
+                src_key_padding_mask: Optional[Tensor] = None,
+                pos: Optional[Tensor] = None,
+                sgdt=None,
+                # pre_calculated_attn: Optional[Tensor] = None,
+                ):
+        q = k = self.with_pos_embed(src, pos)
+
+        # src2 = self.self_attn(q, k, value=src, attn_mask=src_mask,
+        #                       key_padding_mask=src_key_padding_mask)[0]
+
+        #  need_weights=True, average_attn_weights=False
+        # attn_output_weight_logits : (b, num_heads, N, N)  torch.Size([2,8, 888, 888]) (bsz, num_heads, tgt_len, src_len)
+        # no backpropagation for X
+        k_teacher = mark_encoder_feature_by_fg_gt(k.clone().detach(), sgdt)
         src2_s_t_tuple, _, attn_output_weight_logits_s_t_tuple = self.self_attn(
-            q, k, value=src,  # never use value = v and v = src.
-            query_teacher=q_teacher,
-            key_teacher=k_teacher,
-            value_teacher=v_teacher,
+            q, k, value=src, key_teacher=k_teacher,
             attn_mask=src_mask,
             key_padding_mask=src_key_padding_mask,
             need_weights=True, average_attn_weights=False,
+            # use pre_calculated_attn
+            # pre_calculated_attn=pre_calculated_attn,  # torch.Size([2, 8, 696, 696])
+            # freeze_wq=True,
+            # freeze_wk=True,
+        )
+        src2, src2_teacher = src2_s_t_tuple
+        attn_map_logits, attn_output_weight_logits_teacher = attn_output_weight_logits_s_t_tuple
+        src_teacher = self.teacher_encoder_layer(
+            src=src.detach().clone(),
+            mha_out=src2_teacher,  # mha_out
+        )
+        src = src + self.dropout1(src2)
+        src = self.norm1(src)
+        src2 = self.linear2(self.dropout(self.activation(self.linear1(src))))
+        src = src + self.dropout2(src2)
+        src = self.norm2(src)
+
+        # return (src, src_teacher), attn_output_weight_logits_s_t_tuple
+        return src, attn_map_logits, src_teacher, attn_output_weight_logits_teacher
+
+
+class TransformerEncoderLayerSTMarkFgBgShareVNoFreeze(TransformerEncoderLayer):
+
+    def __init__(self, d_model, nhead, dim_feedforward=2048, dropout=0.1,
+                 activation="relu", normalize_before=False):
+        super().__init__(d_model=d_model, nhead=nhead, dim_feedforward=dim_feedforward,
+                         dropout=dropout, activation=activation, normalize_before=normalize_before)
+
+        # update the self_attn
+        del self.self_attn
+        # self.self_attn = MultiheadAttentionExtended(d_model, nhead, dropout=dropout)
+
+        self.self_attn = MultiheadAttentionShareV(d_model, nhead, dropout=dropout)
+
+        self.teacher_encoder_layer = _TransformerEncoderLayerFFNOnly(
+            d_model=d_model, dim_feedforward=dim_feedforward,
+            dropout=dropout, activation=activation,
+            normalize_before=normalize_before)
+
+    def forward(self,
+                src,
+                src_mask: Optional[Tensor] = None,
+                src_key_padding_mask: Optional[Tensor] = None,
+                pos: Optional[Tensor] = None,
+                sgdt=None,
+                # pre_calculated_attn: Optional[Tensor] = None,
+                ):
+        q = k = self.with_pos_embed(src, pos)
+
+        # src2 = self.self_attn(q, k, value=src, attn_mask=src_mask,
+        #                       key_padding_mask=src_key_padding_mask)[0]
+
+        #  need_weights=True, average_attn_weights=False
+        # attn_output_weight_logits : (b, num_heads, N, N)  torch.Size([2,8, 888, 888]) (bsz, num_heads, tgt_len, src_len)
+        # no backpropagation for X
+        k_teacher = mark_encoder_feature_by_fg_gt(k.clone().detach(), sgdt)
+        src2_s_t_tuple, _, attn_output_weight_logits_s_t_tuple = self.self_attn(
+            q, k, value=src, query_teacher=q.clone(), key_teacher=k_teacher,
+            attn_mask=src_mask,
+            key_padding_mask=src_key_padding_mask,
+            need_weights=True, average_attn_weights=False,
+            # use pre_calculated_attn
+            # pre_calculated_attn=pre_calculated_attn,  # torch.Size([2, 8, 696, 696])
+            # freeze_wq=True,
+            # freeze_wk=True,
+        )
+        src2, src2_teacher = src2_s_t_tuple
+        attn_map_logits, attn_output_weight_logits_teacher = attn_output_weight_logits_s_t_tuple
+        src_teacher = self.teacher_encoder_layer(
+            src=src,  # src.detach().clone(),
+            mha_out=src2_teacher,  # mha_out
+        )
+        src = src + self.dropout1(src2)
+        src = self.norm1(src)
+        src2 = self.linear2(self.dropout(self.activation(self.linear1(src))))
+        src = src + self.dropout2(src2)
+        src = self.norm2(src)
+
+        # return (src, src_teacher), attn_output_weight_logits_s_t_tuple
+        return src, attn_map_logits, src_teacher, attn_output_weight_logits_teacher
+
+
+class TransformerEncoderLayerSTSGDTShareVNoFreeze(TransformerEncoderLayerSTMarkFgBgShareVNoFreeze):
+
+    def forward(self,
+                src,
+                src_mask: Optional[Tensor] = None,
+                src_key_padding_mask: Optional[Tensor] = None,
+                pos: Optional[Tensor] = None,
+                sgdt=None,
+                # pre_calculated_attn: Optional[Tensor] = None,
+                ):
+        q = k = self.with_pos_embed(src, pos)
+
+        # ============================
+        # k_teacher = mark_encoder_feature_by_fg_gt(k.clone().detach(), sgdt)
+        sgdt_output = sgdt(x=src, mask=src_key_padding_mask, )
+        k_adapted_pos = pos
+        k_teacher = self.with_pos_embed(sgdt_output['x'], pos=k_adapted_pos)
+        # ============================
+
+        # freeze_wq: bool = False
+        # freeze_wk: bool = False
+        # freeze_wv: bool = False
+        # freeze_wq_teacher: bool = False
+        # freeze_wk_teacher: bool = False
+        if sgdt.freeze_online_encoder_distillation:
+            src2_s_t_tuple, _, attn_output_weight_logits_s_t_tuple = self.self_attn(
+                q, k, value=src,
+                query_teacher=q.clone().detach(), key_teacher=k_teacher.clone().detach(),
+                attn_mask=src_mask,
+                key_padding_mask=src_key_padding_mask,
+                need_weights=True, average_attn_weights=False,
+                # use pre_calculated_attn
+                # pre_calculated_attn=pre_calculated_attn,  # torch.Size([2, 8, 696, 696])
+                # freeze_wq=freeze_wq,
+                # freeze_wk=freeze_wk,
+                # freeze_wv=freeze_wv,
+                freeze_wq_teacher=True,
+                freeze_wk_teacher=True,
+                freeze_v_teacher=True,  # TODO
+            )
+        elif sgdt.freeze_attn_online_encoder_distillation:
+            src2_s_t_tuple, _, attn_output_weight_logits_s_t_tuple = self.self_attn(
+                q.clone().detach(), k.clone().detach(), value=src.clone().detach(),
+                query_teacher=q.clone().detach(), key_teacher=k_teacher.clone().detach(),
+                attn_mask=src_mask,
+                key_padding_mask=src_key_padding_mask,
+                need_weights=True, average_attn_weights=False,
+                # use pre_calculated_attn
+                # pre_calculated_attn=pre_calculated_attn,  # torch.Size([2, 8, 696, 696])
+                # freeze_wq=freeze_wq,
+                # freeze_wk=freeze_wk,
+                # freeze_wv=freeze_wv,
+                freeze_wq_teacher=True,
+                freeze_wk_teacher=True,
+                freeze_v_teacher=True,
+                freeze_wv=True,  # freeze v, only learn w_q, w_k
+            )
+        else:
+            src2_s_t_tuple, _, attn_output_weight_logits_s_t_tuple = self.self_attn(
+                q, k, value=src, query_teacher=q.clone(), key_teacher=k_teacher,
+                attn_mask=src_mask,
+                key_padding_mask=src_key_padding_mask,
+                need_weights=True, average_attn_weights=False,
+                # use pre_calculated_attn
+                # pre_calculated_attn=pre_calculated_attn,  # torch.Size([2, 8, 696, 696])
+            )
+
+        src2, src2_teacher = src2_s_t_tuple
+        attn_map_logits, attn_output_weight_logits_teacher = attn_output_weight_logits_s_t_tuple
+
+        src_teacher = self.teacher_encoder_layer(
+            src=src,  # src.detach().clone(),
+            mha_out=src2_teacher,  # mha_out
+        )
+        src = src + self.dropout1(src2)
+        src = self.norm1(src)
+        src2 = self.linear2(self.dropout(self.activation(self.linear1(src))))
+        src = src + self.dropout2(src2)
+        src = self.norm2(src)
+
+        # return (src, src_teacher), attn_output_weight_logits_s_t_tuple
+        return src, attn_map_logits, src_teacher, attn_output_weight_logits_teacher
+
+
+class TransformerEncoderLayerSTSGDTShareVOutProjFFN(TransformerEncoderLayerSTMarkFgBgShareVNoFreeze):
+
+    def __init__(self, d_model, nhead, dim_feedforward=2048, dropout=0.1,
+                 activation="relu", normalize_before=False):
+        super().__init__(d_model=d_model, nhead=nhead, dim_feedforward=dim_feedforward,
+                         dropout=dropout, activation=activation, normalize_before=normalize_before)
+
+        # update the self_attn
+        del self.self_attn
+        # self.self_attn = MultiheadAttentionExtended(d_model, nhead, dropout=dropout)
+
+        self.self_attn = MultiheadAttentionShareVOutProj(d_model, nhead, dropout=dropout)
+
+        self.teacher_encoder_layer = None
+
+    def forward(self,
+                src,
+                src_mask: Optional[Tensor] = None,
+                src_key_padding_mask: Optional[Tensor] = None,
+                pos: Optional[Tensor] = None,
+                sgdt=None,
+                # pre_calculated_attn: Optional[Tensor] = None,
+                ):
+        q = k = self.with_pos_embed(src, pos)
+
+        # ============================
+        # k_teacher = mark_encoder_feature_by_fg_gt(k.clone().detach(), sgdt)
+        if sgdt.freeze_attn_online_encoder_distillation:
+            sgdt_output = sgdt(x=src.clone().detach(), mask=src_key_padding_mask, )
+            k_adapted_pos = pos.clone().detach()
+            k_teacher = self.with_pos_embed(sgdt_output['x'], pos=k_adapted_pos)
+        else:
+            sgdt_output = sgdt(x=src, mask=src_key_padding_mask, )
+            k_adapted_pos = pos
+            k_teacher = self.with_pos_embed(sgdt_output['x'], pos=k_adapted_pos)
+        # ============================
+
+        # freeze_wq: bool = False
+        # freeze_wk: bool = False
+        # freeze_wv: bool = False
+        # freeze_wq_teacher: bool = False
+        # freeze_wk_teacher: bool = False
+
+        token_sweep_mask = None
+        if sgdt.debug_st_attn_sweep_fg_attn or sgdt.debug_st_attn_sweep_bg_attn:
+            fg_gt = sgdt.sgdt_targets['fg_gt']
+
+            if sgdt.debug_st_attn_sweep_fg_attn:
+                token_sweep_mask = fg_gt.bool()
+            else:
+                token_sweep_mask = ~(fg_gt.bool())
+
+        if sgdt.freeze_online_encoder_distillation:  # wk, wq, wv can be updated and teacher can update wv
+            src2_s_t_tuple, _, attn_output_weight_logits_s_t_tuple = self.self_attn(
+                q, k, value=src,
+                query_teacher=q.clone().detach(), key_teacher=k_teacher.clone().detach(),
+                attn_mask=src_mask,
+                key_padding_mask=src_key_padding_mask,
+                need_weights=True, average_attn_weights=False,
+                # use pre_calculated_attn
+                # pre_calculated_attn=pre_calculated_attn,  # torch.Size([2, 8, 696, 696])
+                # freeze_wq=freeze_wq,
+                # freeze_wk=freeze_wk,
+                # freeze_wv=freeze_wv,
+                freeze_wq_teacher=True,
+                freeze_wk_teacher=True,
+                freeze_v_teacher=True,  # TODO
+                debug_st_attn_sweep_n_attn_heads=sgdt.debug_st_attn_sweep_n_attn_heads,
+                token_sweep_mask=token_sweep_mask,
+            )
+        elif sgdt.freeze_attn_online_encoder_distillation:  # only wk, wq can be updated
+            src2_s_t_tuple, _, attn_output_weight_logits_s_t_tuple = self.self_attn(
+                # q.clone().detach(), k.clone().detach(), value=src.clone().detach(),
+                q, k, value=src,
+                query_teacher=q.clone().detach(), key_teacher=k_teacher.clone().detach(),
+                attn_mask=src_mask,
+                key_padding_mask=src_key_padding_mask,
+                need_weights=True, average_attn_weights=False,
+                # use pre_calculated_attn
+                # pre_calculated_attn=pre_calculated_attn,  # torch.Size([2, 8, 696, 696])
+                # freeze_wq=freeze_wq,
+                # freeze_wk=freeze_wk,
+                # freeze_wv=freeze_wv,
+                freeze_wq_teacher=True,
+                freeze_wk_teacher=True,
+                freeze_v_teacher=True,
+                freeze_wv=True,  # freeze v, only learn w_q, w_k
+                debug_st_attn_sweep_n_attn_heads=sgdt.debug_st_attn_sweep_n_attn_heads,
+                token_sweep_mask=token_sweep_mask,
+            )
+        else:
+            src2_s_t_tuple, _, attn_output_weight_logits_s_t_tuple = self.self_attn(
+                q, k, value=src, query_teacher=q.clone(), key_teacher=k_teacher,
+                attn_mask=src_mask,
+                key_padding_mask=src_key_padding_mask,
+                need_weights=True, average_attn_weights=False,
+                # use pre_calculated_attn
+                # pre_calculated_attn=pre_calculated_attn,  # torch.Size([2, 8, 696, 696])
+                debug_st_attn_sweep_n_attn_heads=sgdt.debug_st_attn_sweep_n_attn_heads,
+                token_sweep_mask=token_sweep_mask,
+            )
+
+        src2, src2_t = src2_s_t_tuple
+        attn_map_logits, attn_output_weight_logits_teacher = attn_output_weight_logits_s_t_tuple
+
+        # src_teacher = self.teacher_encoder_layer(
+        #     src=src,  # src.detach().clone(),
+        #     mha_out=src2_teacher,  # mha_out
+        # )
+        if sgdt.freeze_attn_online_encoder_distillation and self.training:
+            src_t = None  # skip the forward
+        else:
+            src_t = src + self.dropout1(src2_t)
+            src_t = self.norm1(src_t)
+            src2_t = self.linear2(self.dropout(self.activation(self.linear1(src_t))))
+            src_t = src_t + self.dropout2(src2_t)
+            src_t = self.norm2(src_t)
+
+        src = src + self.dropout1(src2)
+        src = self.norm1(src)
+        src2 = self.linear2(self.dropout(self.activation(self.linear1(src))))
+        src = src + self.dropout2(src2)
+        src = self.norm2(src)
+
+        # return (src, src_teacher), attn_output_weight_logits_s_t_tuple
+        return src, attn_map_logits, src_t, attn_output_weight_logits_teacher
+
+
+class TransformerEncoderLayersMLPQKShareVOutProjFFN(TransformerEncoderLayerSTSGDTShareVOutProjFFN):
+    def forward(self,
+                src,
+                src_mask: Optional[Tensor] = None,
+                src_key_padding_mask: Optional[Tensor] = None,
+                pos: Optional[Tensor] = None,
+                sgdt=None,
+                # pre_calculated_attn: Optional[Tensor] = None,
+                ):
+        q = k = self.with_pos_embed(src, pos)
+
+        # ============================
+        # k_teacher = mark_encoder_feature_by_fg_gt(k.clone().detach(), sgdt)
+
+        sgdt_output = sgdt(x=src, mask=src_key_padding_mask,)
+        k_teacher = self.with_pos_embed(sgdt_output['x'], pos=pos)
+        # ============================
+        # query_teacher=q.clone()  -> k_teacher
+
+        src2_s_t_tuple, _, attn_output_weight_logits_s_t_tuple = self.self_attn(
+            q, k, value=src, query_teacher=k_teacher, key_teacher=k_teacher,
+            attn_mask=src_mask,
+            key_padding_mask=src_key_padding_mask,
+            need_weights=True, average_attn_weights=False,
+            # # use pre_calculated_attn
+            # # pre_calculated_attn=pre_calculated_attn,  # torch.Size([2, 8, 696, 696])
+            # debug_st_attn_sweep_n_attn_heads=sgdt.debug_st_attn_sweep_n_attn_heads,
+            # token_sweep_mask=token_sweep_mask,
         )
 
         src2, src2_t = src2_s_t_tuple
         attn_map_logits, attn_output_weight_logits_teacher = attn_output_weight_logits_s_t_tuple
 
-        return src, src2, src2_t, attn_map_logits, attn_output_weight_logits_teacher
+        # src_teacher = self.teacher_encoder_layer(
+        #     src=src,  # src.detach().clone(),
+        #     mha_out=src2_teacher,  # mha_out
+        # )
+        if sgdt.freeze_attn_online_encoder_distillation and self.training:
+            src_t = None  # skip the forward
+        else:
+            src_t = src + self.dropout1(src2_t)
+            src_t = self.norm1(src_t)
+            src2_t = self.linear2(self.dropout(self.activation(self.linear1(src_t))))
+            src_t = src_t + self.dropout2(src2_t)
+            src_t = self.norm2(src_t)
 
-    def forward(self,
-                src,
-                src_mask: Optional[Tensor] = None,
-                src_key_padding_mask: Optional[Tensor] = None,
-                pos: Optional[Tensor] = None,
-                sgdt=None,
-                ):
-        src, src2, src2_t, attn_map_logits, attn_output_weight_logits_teacher = self.forward_attn(
-            src=src,
-            src_mask=src_mask,
-            src_key_padding_mask=src_key_padding_mask,
-            pos=pos,
-            sgdt=sgdt,
-        )
+        src = src + self.dropout1(src2)
+        src = self.norm1(src)
+        src2 = self.linear2(self.dropout(self.activation(self.linear1(src))))
+        src = src + self.dropout2(src2)
+        src = self.norm2(src)
 
-        # if sgdt.freeze_attn_online_encoder_distillation and self.training:
-        #     src_t = None  # skip the forward
-        # else:
-        src_t = self.ffn_from_mha_out(src=src, mha_out=src2_t)
-        src_s = self.ffn_from_mha_out(src=src, mha_out=src2)
         # return (src, src_teacher), attn_output_weight_logits_s_t_tuple
-        return src_s, attn_map_logits, src_t, attn_output_weight_logits_teacher
+        return src, attn_map_logits, src_t, attn_output_weight_logits_teacher
 
-
-class TransformerEncoderDualAttnLayerShareVFFN(TransformerEncoderDualAttnLayerShareVOutProjFFN):
-
-    def __init__(self, d_model, nhead, dim_feedforward=2048, dropout=0.1,
-                 activation="relu", normalize_before=False):
-        super().__init__(d_model=d_model, nhead=nhead, dim_feedforward=dim_feedforward,
-                         dropout=dropout, activation=activation, normalize_before=normalize_before)
-
-        # update the self_attn
-        del self.self_attn
-        # self.self_attn = MultiheadAttention(d_model, nhead, dropout=dropout)
-        self.self_attn = MultiheadDualAttention(
-            d_model, nhead, dropout=dropout,
-            share_v=True, share_out_proj_weight=False,
-        )
-
-
-class TransformerEncoderDualAttnLayerShareV(TransformerEncoderDualAttnLayerShareVOutProjFFN):
-
-    def __init__(self, d_model, nhead, dim_feedforward=2048, dropout=0.1,
-                 activation="relu", normalize_before=False):
-        super().__init__(d_model=d_model, nhead=nhead, dim_feedforward=dim_feedforward,
-                         dropout=dropout, activation=activation, normalize_before=normalize_before)
-
-        # update the self_attn
-        del self.self_attn
-        # self.self_attn = MultiheadAttentionExtended(d_model, nhead, dropout=dropout)
-        self.self_attn = MultiheadDualAttention(
-            d_model, nhead, dropout=dropout,
-            share_v=True, share_out_proj_weight=False,
-        )
-        self.teacher_ffn = _TransformerEncoderLayerFFNOnly(
-            d_model=d_model, dim_feedforward=dim_feedforward,
-            dropout=dropout, activation=activation,
-            normalize_before=normalize_before)
-
+class TransformerEncoderLayerMarkFg1Bg0QKShareVOutProjFFN(TransformerEncoderLayerSTSGDTShareVOutProjFFN):
     def forward(self,
                 src,
                 src_mask: Optional[Tensor] = None,
                 src_key_padding_mask: Optional[Tensor] = None,
                 pos: Optional[Tensor] = None,
                 sgdt=None,
+                # pre_calculated_attn: Optional[Tensor] = None,
                 ):
-        src, src2, src2_t, attn_map_logits, attn_output_weight_logits_teacher = self.forward_attn(
-            src=src,
-            src_mask=src_mask,
-            src_key_padding_mask=src_key_padding_mask,
-            pos=pos,
-            sgdt=sgdt,
-        )
+        q = k = self.with_pos_embed(src, pos)
 
-        # if sgdt.freeze_attn_online_encoder_distillation and self.training:
-        #     src_t = None  # skip the forward
-        # # else:
-
-        ######## bug version
-        # src_t = self.ffn_from_mha_out(src=src, mha_out=src2_t)
-        # src = self.teacher_ffn(src=src, mha_out=src2)  # same as ffn_from_mha_out
-        ########
-        src_s = self.ffn_from_mha_out(src=src, mha_out=src2)
-        src_t = self.teacher_ffn(src=src, mha_out=src2_t)  # same as ffn_from_mha_out
-        return src_s, attn_map_logits, src_t, attn_output_weight_logits_teacher
-
-
-class TransformerEncoderDualAttnLayerShareAttnOutProjFFN(TransformerEncoderDualAttnLayerShareVOutProjFFN):
-
-    def __init__(self, d_model, nhead, dim_feedforward=2048, dropout=0.1,
-                 activation="relu", normalize_before=False):
-        super().__init__(d_model=d_model, nhead=nhead, dim_feedforward=dim_feedforward,
-                         dropout=dropout, activation=activation, normalize_before=normalize_before)
-
-        # update the self_attn
-        del self.self_attn
-        # self.self_attn = MultiheadAttentionExtended(d_model, nhead, dropout=dropout)
-        self.self_attn = MultiheadDualAttention(
-            d_model, nhead, dropout=dropout,
-            share_v=False, share_attn_map=True,
-            share_out_proj_weight=True,
-        )
-
-        self.teacher_ffn = None
-
-
-class TransformerEncoderDualAttnLayerShareAttnFFN(TransformerEncoderDualAttnLayerShareVFFN):
-
-    def __init__(self, d_model, nhead, dim_feedforward=2048, dropout=0.1,
-                 activation="relu", normalize_before=False):
-        super().__init__(d_model=d_model, nhead=nhead, dim_feedforward=dim_feedforward,
-                         dropout=dropout, activation=activation, normalize_before=normalize_before)
-
-        # update the self_attn
-        del self.self_attn
-        # self.self_attn = MultiheadAttention(d_model, nhead, dropout=dropout)
-        self.self_attn = MultiheadDualAttention(
-            d_model, nhead, dropout=dropout,
-            share_v=False, share_attn_map=True,
-            share_out_proj_weight=False,
-        )
-        self.teacher_ffn = None
-
-
-class TransformerEncoderDualAttnLayerShareAttn(TransformerEncoderDualAttnLayerShareV):
-
-    def __init__(self, d_model, nhead, dim_feedforward=2048, dropout=0.1,
-                 activation="relu", normalize_before=False):
-        super().__init__(d_model=d_model, nhead=nhead, dim_feedforward=dim_feedforward,
-                         dropout=dropout, activation=activation, normalize_before=normalize_before)
-
-        # update the self_attn
-        del self.self_attn
-        # self.self_attn = MultiheadAttentionExtended(d_model, nhead, dropout=dropout)
-        self.self_attn = MultiheadDualAttention(
-            d_model, nhead, dropout=dropout,
-            share_v=False, share_attn_map=True,
-            share_out_proj_weight=False,
-        )
-        self.teacher_ffn = _TransformerEncoderLayerFFNOnly(
-            d_model=d_model, dim_feedforward=dim_feedforward,
-            dropout=dropout, activation=activation,
-            normalize_before=normalize_before)
-
-
-class TransformerEncoderTripleAttnLayerShareOutProjFFN(TransformerEncoderLayer):
-
-    def __init__(self, d_model, nhead, dim_feedforward=2048, dropout=0.1,
-                 activation="relu", normalize_before=False):
-        super().__init__(d_model=d_model, nhead=nhead, dim_feedforward=dim_feedforward,
-                         dropout=dropout, activation=activation, normalize_before=normalize_before)
-
-        # update the self_attn
-        del self.self_attn
-        # self.self_attn = MultiheadAttentionExtended(d_model, nhead, dropout=dropout)
-        self.self_attn = MultiheadTripleAttention(
-            d_model, nhead, dropout=dropout,
-            share_q=False, share_k=False, share_attn_map=True,  # Teacher 1
-            share_v=True,  # Teacher2
-            share_out_proj_weight=True,  # Teacher 1 and Teacher2
-        )
-
-    def forward_attn(self,
-                     src,
-                     src_mask: Optional[Tensor] = None,
-                     src_key_padding_mask: Optional[Tensor] = None,
-                     pos: Optional[Tensor] = None,
-                     sgdt=None,
-                     ):
-        # student
-        q = k = with_pos_embed(src, pos)
-        # v = src
-        q_teacher, k_teacher, v_teacher = get_self_attn_q_k_v(
-            src=src, pos=pos, src_key_padding_mask=src_key_padding_mask, sgdt=sgdt, )
+        # ============================
+        k_teacher = mark_encoder_feature_by_fg_gt(src.clone(), sgdt)
+        k_teacher = self.with_pos_embed(k_teacher, pos=pos)
+        # ============================
+        # query_teacher=q.clone()  -> k_teacher
 
         src2_s_t_tuple, _, attn_output_weight_logits_s_t_tuple = self.self_attn(
-            q, k, value=src,
-            query_teacher=q_teacher,
-            key_teacher=k_teacher,
-            value_teacher=v_teacher,
+            q, k, value=src, query_teacher=k_teacher, key_teacher=k_teacher,
             attn_mask=src_mask,
             key_padding_mask=src_key_padding_mask,
             need_weights=True, average_attn_weights=False,
+            # # use pre_calculated_attn
+            # # pre_calculated_attn=pre_calculated_attn,  # torch.Size([2, 8, 696, 696])
+            # debug_st_attn_sweep_n_attn_heads=sgdt.debug_st_attn_sweep_n_attn_heads,
+            # token_sweep_mask=token_sweep_mask,
         )
-        # Below is different, the above is the same.
-        src2, src2_t1, src2_t2 = src2_s_t_tuple
-        attn_map_logits, attn_map_logits_teacher1, attn_map_logits_teacher2 = attn_output_weight_logits_s_t_tuple
 
-        return src, src2, src2_t1, src2_t2, attn_map_logits, attn_map_logits_teacher1, attn_map_logits_teacher2
+        src2, src2_t = src2_s_t_tuple
+        attn_map_logits, attn_output_weight_logits_teacher = attn_output_weight_logits_s_t_tuple
+
+        # src_teacher = self.teacher_encoder_layer(
+        #     src=src,  # src.detach().clone(),
+        #     mha_out=src2_teacher,  # mha_out
+        # )
+        if sgdt.freeze_attn_online_encoder_distillation and self.training:
+            src_t = None  # skip the forward
+        else:
+            src_t = src + self.dropout1(src2_t)
+            src_t = self.norm1(src_t)
+            src2_t = self.linear2(self.dropout(self.activation(self.linear1(src_t))))
+            src_t = src_t + self.dropout2(src2_t)
+            src_t = self.norm2(src_t)
+
+        src = src + self.dropout1(src2)
+        src = self.norm1(src)
+        src2 = self.linear2(self.dropout(self.activation(self.linear1(src))))
+        src = src + self.dropout2(src2)
+        src = self.norm2(src)
+
+        # return (src, src_teacher), attn_output_weight_logits_s_t_tuple
+        return src, attn_map_logits, src_t, attn_output_weight_logits_teacher
+
+class TransformerEncoderLayerSTSGDTShareAttnOutProjFFN(TransformerEncoderLayerSTMarkFgBgShareVNoFreeze):
+
+    def __init__(self, d_model, nhead, dim_feedforward=2048, dropout=0.1,
+                 activation="relu", normalize_before=False):
+        super().__init__(d_model=d_model, nhead=nhead, dim_feedforward=dim_feedforward,
+                         dropout=dropout, activation=activation, normalize_before=normalize_before)
+
+        # update the self_attn
+        del self.self_attn
+        # self.self_attn = MultiheadAttentionExtended(d_model, nhead, dropout=dropout)
+
+        self.self_attn = MultiheadAttentionShareAttnOutProj(d_model, nhead, dropout=dropout)
+
+        self.teacher_encoder_layer = None
 
     def forward(self,
                 src,
@@ -602,79 +1395,211 @@ class TransformerEncoderTripleAttnLayerShareOutProjFFN(TransformerEncoderLayer):
                 src_key_padding_mask: Optional[Tensor] = None,
                 pos: Optional[Tensor] = None,
                 sgdt=None,
+                # pre_calculated_attn: Optional[Tensor] = None,
                 ):
-        src, src2, src2_t1, src2_t2, attn_map_logits, attn_map_logits_teacher1, attn_map_logits_teacher2 = \
-            self.forward_attn(
-                src=src,
-                src_mask=src_mask,
-                src_key_padding_mask=src_key_padding_mask,
-                pos=pos,
-                sgdt=sgdt,
+        q = k = self.with_pos_embed(src, pos)
+
+        # ============================
+        # k_teacher = mark_encoder_feature_by_fg_gt(k.clone().detach(), sgdt)
+
+        sgdt_output = sgdt(x=src, mask=src_key_padding_mask, )
+        # adapted_pos = pos
+        # v_teacher = self.with_pos_embed(sgdt_output['x'], pos=adapted_pos)
+        v_teacher = sgdt_output['x']
+
+        src2_s_t_tuple, _, attn_output_weight_logits_s_t_tuple = self.self_attn(
+            q, k, value=src,
+            value_teacher=v_teacher,
+            # query_teacher=q.clone(), key_teacher=k_teacher,
+            attn_mask=src_mask,
+            key_padding_mask=src_key_padding_mask,
+            need_weights=True, average_attn_weights=False,
+            # # use pre_calculated_attn
+            # # pre_calculated_attn=pre_calculated_attn,  # torch.Size([2, 8, 696, 696])
+            # debug_st_attn_sweep_n_attn_heads=sgdt.debug_st_attn_sweep_n_attn_heads,
+            # token_sweep_mask=token_sweep_mask,
+        )
+
+        src2, src2_t = src2_s_t_tuple
+        attn_map_logits, attn_output_weight_logits_teacher = attn_output_weight_logits_s_t_tuple
+
+        # src_teacher = self.teacher_encoder_layer(
+        #     src=src,  # src.detach().clone(),
+        #     mha_out=src2_teacher,  # mha_out
+        # )
+        if sgdt.freeze_attn_online_encoder_distillation and self.training:
+            src_t = None  # skip the forward
+        else:
+            src_t = src + self.dropout1(src2_t)
+            src_t = self.norm1(src_t)
+            src2_t = self.linear2(self.dropout(self.activation(self.linear1(src_t))))
+            src_t = src_t + self.dropout2(src2_t)
+            src_t = self.norm2(src_t)
+
+        src = src + self.dropout1(src2)
+        src = self.norm1(src)
+        src2 = self.linear2(self.dropout(self.activation(self.linear1(src))))
+        src = src + self.dropout2(src2)
+        src = self.norm2(src)
+
+        # return (src, src_teacher), attn_output_weight_logits_s_t_tuple
+        return src, attn_map_logits, src_t, attn_output_weight_logits_teacher
+
+
+
+class TransformerEncoderLayerSTSGDTShareVFFN(TransformerEncoderLayerSTMarkFgBgShareVNoFreeze):
+
+    def __init__(self, d_model, nhead, dim_feedforward=2048, dropout=0.1,
+                 activation="relu", normalize_before=False):
+        super().__init__(d_model=d_model, nhead=nhead, dim_feedforward=dim_feedforward,
+                         dropout=dropout, activation=activation, normalize_before=normalize_before)
+
+        # update the self_attn
+        del self.self_attn
+        self.self_attn = MultiheadAttentionShareV(d_model, nhead, dropout=dropout)
+        # self.self_attn = MultiheadAttentionShareVOutProj(d_model, nhead, dropout=dropout)
+
+        self.teacher_encoder_layer = None
+
+    def forward(self,
+                src,
+                src_mask: Optional[Tensor] = None,
+                src_key_padding_mask: Optional[Tensor] = None,
+                pos: Optional[Tensor] = None,
+                sgdt=None,
+                # pre_calculated_attn: Optional[Tensor] = None,
+                ):
+        q = k = self.with_pos_embed(src, pos)
+
+        # ============================
+        # k_teacher = mark_encoder_feature_by_fg_gt(k.clone().detach(), sgdt)
+        sgdt_output = sgdt(x=src, mask=src_key_padding_mask, )
+        k_adapted_pos = pos
+        k_teacher = self.with_pos_embed(sgdt_output['x'], pos=k_adapted_pos)
+        # ============================
+
+        # freeze_wq: bool = False
+        # freeze_wk: bool = False
+        # freeze_wv: bool = False
+        # freeze_wq_teacher: bool = False
+        # freeze_wk_teacher: bool = False
+        if sgdt.freeze_online_encoder_distillation:
+            src2_s_t_tuple, _, attn_output_weight_logits_s_t_tuple = self.self_attn(
+                q, k, value=src,
+                query_teacher=q.clone().detach(), key_teacher=k_teacher.clone().detach(),
+                attn_mask=src_mask,
+                key_padding_mask=src_key_padding_mask,
+                need_weights=True, average_attn_weights=False,
+                # use pre_calculated_attn
+                # pre_calculated_attn=pre_calculated_attn,  # torch.Size([2, 8, 696, 696])
+                # freeze_wq=freeze_wq,
+                # freeze_wk=freeze_wk,
+                # freeze_wv=freeze_wv,
+                freeze_wq_teacher=True,
+                freeze_wk_teacher=True,
+                freeze_v_teacher=True,  # TODO
+            )
+        elif sgdt.freeze_attn_online_encoder_distillation:
+            src2_s_t_tuple, _, attn_output_weight_logits_s_t_tuple = self.self_attn(
+                q.clone().detach(), k.clone().detach(), value=src.clone().detach(),
+                query_teacher=q.clone().detach(), key_teacher=k_teacher.clone().detach(),
+                attn_mask=src_mask,
+                key_padding_mask=src_key_padding_mask,
+                need_weights=True, average_attn_weights=False,
+                # use pre_calculated_attn
+                # pre_calculated_attn=pre_calculated_attn,  # torch.Size([2, 8, 696, 696])
+                # freeze_wq=freeze_wq,
+                # freeze_wk=freeze_wk,
+                # freeze_wv=freeze_wv,
+                freeze_wq_teacher=True,
+                freeze_wk_teacher=True,
+                freeze_v_teacher=True,
+                freeze_wv=True,  # freeze v, only learn w_q, w_k
+            )
+        else:
+            src2_s_t_tuple, _, attn_output_weight_logits_s_t_tuple = self.self_attn(
+                q, k, value=src, query_teacher=q.clone(), key_teacher=k_teacher,
+                attn_mask=src_mask,
+                key_padding_mask=src_key_padding_mask,
+                need_weights=True, average_attn_weights=False,
+                # use pre_calculated_attn
+                # pre_calculated_attn=pre_calculated_attn,  # torch.Size([2, 8, 696, 696])
             )
 
-        # if sgdt.freeze_attn_online_encoder_distillation and self.training:
-        #     src_t = None  # skip the forward
-        # else:
-        src_t1 = self.ffn_from_mha_out(src=src, mha_out=src2_t1)
-        src_t2 = self.ffn_from_mha_out(src=src, mha_out=src2_t2)
-        src_s = self.ffn_from_mha_out(src=src, mha_out=src2)
+        src2, src2_t = src2_s_t_tuple
+        attn_map_logits, attn_output_weight_logits_teacher = attn_output_weight_logits_s_t_tuple
+
+        # src_teacher = self.teacher_encoder_layer(
+        #     src=src,  # src.detach().clone(),
+        #     mha_out=src2_teacher,  # mha_out
+        # )
+
+        src_t = src + self.dropout1(src2_t)
+        src_t = self.norm1(src_t)
+        src2_t = self.linear2(self.dropout(self.activation(self.linear1(src_t))))
+        src_t = src_t + self.dropout2(src2_t)
+        src_t = self.norm2(src_t)
+
+        src = src + self.dropout1(src2)
+        src = self.norm1(src)
+        src2 = self.linear2(self.dropout(self.activation(self.linear1(src))))
+        src = src + self.dropout2(src2)
+        src = self.norm2(src)
+
         # return (src, src_teacher), attn_output_weight_logits_s_t_tuple
-        return src_s, attn_map_logits, (src_t1, src_t2), (attn_map_logits_teacher1, attn_map_logits_teacher2)
+        return src, attn_map_logits, src_t, attn_output_weight_logits_teacher
 
 
+class TransformerEncoderLayerSTShareSGDTUpdateKAttn(TransformerEncoderLayer):
+    #
 
+    def __init__(self, d_model, nhead, dim_feedforward=2048, dropout=0.1,
+                 activation="relu", normalize_before=False):
+        super().__init__(d_model=d_model, nhead=nhead, dim_feedforward=dim_feedforward,
+                         dropout=dropout, activation=activation, normalize_before=normalize_before)
 
+        self.student_encoder_layer = TransformerEncoderSharedSelfAttnLayer(
+            d_model=d_model, nhead=nhead,
+            dim_feedforward=dim_feedforward,
+            dropout=dropout, activation=activation,
+            normalize_before=normalize_before)
 
-# class AblationTransformerEncoderOnlineShareSTAttnLayer(TransformerEncoderLayer):
-#     #
-#
-#     def __init__(self, d_model, nhead, dim_feedforward=2048, dropout=0.1,
-#                  activation="relu", normalize_before=False):
-#         super().__init__(d_model=d_model, nhead=nhead, dim_feedforward=dim_feedforward,
-#                          dropout=dropout, activation=activation, normalize_before=normalize_before)
-#
-#         self.student_encoder_layer = TransformerEncoderSharedSelfAttnLayer(
-#             d_model=d_model, nhead=nhead,
-#             dim_feedforward=dim_feedforward,
-#             dropout=dropout, activation=activation,
-#             normalize_before=normalize_before)
-#
-#     def forward(self,
-#                 src,
-#                 src_mask: Optional[Tensor] = None,
-#                 src_key_padding_mask: Optional[Tensor] = None,
-#                 pos: Optional[Tensor] = None,
-#                 sgdt=None,
-#                 # pre_calculated_attn: Optional[Tensor] = None,
-#                 ):
-#         q = self.with_pos_embed(src, pos)  # k, v are from the original tokens.
-#         sgdt_output = sgdt(x=src, mask=src_key_padding_mask)
-#         k_adapted_pos = pos
-#         k = self.with_pos_embed(sgdt_output['x'], pos=k_adapted_pos)
-#         assert 'src_mask_reclaimed' in sgdt_output and sgdt_output['src_mask_reclaimed'] is not None
-#         src2, _, attn_output_weight_logits = self.self_attn(q, k, value=src, attn_mask=src_mask,
-#                                                             key_padding_mask=sgdt_output['src_mask_reclaimed'],
-#                                                             need_weights=True, average_attn_weights=False)
-#         # the student branch is not allowed to update the attn by backpropagation
-#         pre_calculated_attn = F.softmax(attn_output_weight_logits.clone().detach(), dim=-1)
-#         src_student, _ = self.student_encoder_layer(
-#             src=src, src_mask=src_mask, src_key_padding_mask=src_key_padding_mask, pos=pos,
-#
-#             # use pre_calculated_attn
-#             pre_calculated_attn=pre_calculated_attn,
-#             # use pre_calculated_attn means w_q, w_k will have zero gradients,
-#             # so we do no need to set freeze_wq, freeze_wk
-#
-#         )
-#
-#         src = src + self.dropout1(src2)
-#         src = self.norm1(src)
-#         src2 = self.linear2(self.dropout(self.activation(self.linear1(src))))
-#         src = src + self.dropout2(src2)
-#         src = self.norm2(src)
-#
-#         # return src, attn_map_logits, src_teacher, attn_output_weight_logits_teacher
-#         return src_student, attn_output_weight_logits, src, attn_output_weight_logits
+    def forward(self,
+                src,
+                src_mask: Optional[Tensor] = None,
+                src_key_padding_mask: Optional[Tensor] = None,
+                pos: Optional[Tensor] = None,
+                sgdt=None,
+                # pre_calculated_attn: Optional[Tensor] = None,
+                ):
+        q = self.with_pos_embed(src, pos)  # k, v are from the original tokens.
+        sgdt_output = sgdt(x=src, mask=src_key_padding_mask)
+        k_adapted_pos = pos
+        k = self.with_pos_embed(sgdt_output['x'], pos=k_adapted_pos)
+        assert 'src_mask_reclaimed' in sgdt_output and sgdt_output['src_mask_reclaimed'] is not None
+        src2, _, attn_output_weight_logits = self.self_attn(q, k, value=src, attn_mask=src_mask,
+                                                            key_padding_mask=sgdt_output['src_mask_reclaimed'],
+                                                            need_weights=True, average_attn_weights=False)
+        # the student branch is not allowed to update the attn by backpropagation
+        pre_calculated_attn = F.softmax(attn_output_weight_logits.clone().detach(), dim=-1)
+        src_student, _ = self.student_encoder_layer(
+            src=src, src_mask=src_mask, src_key_padding_mask=src_key_padding_mask, pos=pos,
+
+            # use pre_calculated_attn
+            pre_calculated_attn=pre_calculated_attn,
+            # use pre_calculated_attn means w_q, w_k will have zero gradients,
+            # so we do no need to set freeze_wq, freeze_wk
+
+        )
+
+        src = src + self.dropout1(src2)
+        src = self.norm1(src)
+        src2 = self.linear2(self.dropout(self.activation(self.linear1(src))))
+        src = src + self.dropout2(src2)
+        src = self.norm2(src)
+
+        # return src, attn_map_logits, src_teacher, attn_output_weight_logits_teacher
+        return src_student, attn_output_weight_logits, src, attn_output_weight_logits
 
 
 class _TransformerEncoderLayerFFNOnly(nn.Module):
@@ -702,7 +1627,9 @@ class _TransformerEncoderLayerFFNOnly(nn.Module):
     def forward(self,
                 src,
                 mha_out,
-                ):
+                src_mask: Optional[Tensor] = None,
+                src_key_padding_mask: Optional[Tensor] = None,
+                pos: Optional[Tensor] = None):
         # q = k = self.with_pos_embed(src, pos)
 
         # src2, _, attn_output_weight_logits = self.self_attn(q, k, value=src, attn_mask=src_mask,
@@ -720,38 +1647,35 @@ class _TransformerEncoderLayerFFNOnly(nn.Module):
 # do not forgot register the layer in forward_subset_encoder_layers
 SGDTEncoderLayerType = {
     'regular': TransformerEncoderLayer,
-    # 'sgdt': TransformerEncoderSGDTLayer,
-    # 'sgdtv0': TransformerEncoderSGDTLayerV0NoMaskUpdate,
-    # 'sgdtv1': TransformerEncoderSGDTLayerV1,
-    # 'sgdt+k': TransformerEncoderSGDTLayerUpdateK,
-    # 'sgdt+qk': TransformerEncoderSGDTLayerUpdateQK,
-    # 'sgdt+v': TransformerEncoderSGDTLayerUpdateV,
-    #
-    # 'sgdt+qkv': TransformerEncoderSGDTLayerUpdateQKV,
-    # 'sgdt+mha+out': TransformerEncoderSGDTLayerUpdateMHAOut,
-    # 'sgdt+mha+feature': TransformerEncoderSGDTLayerUpdateMHAFeature,
-    # 'sgdt+ffn+out': TransformerEncoderSGDTLayerUpdateFFNOut,
-    # 'sgdt+ffn+feature': TransformerEncoderSGDTLayerUpdateFFNFeature,
+    'sgdt': TransformerEncoderSGDTLayer,
+    'sgdtv0': TransformerEncoderSGDTLayerV0NoMaskUpdate,
+    'sgdtv1': TransformerEncoderSGDTLayerV1,
+    'sgdt+k': TransformerEncoderSGDTLayerUpdateK,
+    'sgdt+qk': TransformerEncoderSGDTLayerUpdateQK,
+    'sgdt+v': TransformerEncoderSGDTLayerUpdateV,
 
-    # 'sgdtSharedAttn': TransformerEncoderSharedSelfAttnLayer,
-    # 'sgdtv1FreezeSelfAttn': TransformerEncoderSGDTLayerUpdateKExtendedSelfAttn,
-    # # 'sgdtMarkFgBg': TransformerEncoderMarkFgBgLayer,
-    # # 'sgdtRandomMarkFgBg': TransformerEncoderRandomMarkFgBgLayer,
-    #
-    # # teacher student both in a single encoder layer
-    # 'parallelSTECMarkFgBgVFreezeAll': TransformerEncoderLayerSTMarkFgBgShareQVFreezeAllExceptWK,
-    # 'parallelSTECMarkFgBgShareVNoFreeze': TransformerEncoderLayerSTMarkFgBgShareVNoFreeze,
-    # 'parallelSTECShareSGDTUpdateKAttn': AblationTransformerEncoderOnlineShareSTAttnLayer,
-    # 'parallelSTECSGDTShareVNoFreeze': TransformerEncoderDualAttnLayerShareV,
-    'DualAttnShareVOutProjFFN': TransformerEncoderDualAttnLayerShareVOutProjFFN,
-    'DualAttnShareVFFN': TransformerEncoderDualAttnLayerShareVFFN,
-    'DualAttnShareV': TransformerEncoderDualAttnLayerShareV,
-    'DualAttnShareAttnOutProjFFN': TransformerEncoderDualAttnLayerShareAttnOutProjFFN,
-    'DualAttnShareAttnFFN': TransformerEncoderDualAttnLayerShareAttnFFN,
-    'DualAttnShareAttn': TransformerEncoderDualAttnLayerShareAttn,
+    'sgdt+qkv': TransformerEncoderSGDTLayerUpdateQKV,
+    'sgdt+mha+out': TransformerEncoderSGDTLayerUpdateMHAOut,
+    'sgdt+mha+feature': TransformerEncoderSGDTLayerUpdateMHAFeature,
+    'sgdt+ffn+out': TransformerEncoderSGDTLayerUpdateFFNOut,
+    'sgdt+ffn+feature': TransformerEncoderSGDTLayerUpdateFFNFeature,
 
-    'TripleAttnShareOutProjFFN': TransformerEncoderTripleAttnLayerShareOutProjFFN,
-    # 'TripleAttnShareKV': TransformerEncoderTripleAttnLayerShareKVOutProjFFN,
+    'sgdtSharedAttn': TransformerEncoderSharedSelfAttnLayer,
+    'sgdtv1FreezeSelfAttn': TransformerEncoderSGDTLayerUpdateKExtendedSelfAttn,
+    'sgdtMarkFgBg': TransformerEncoderMarkFgBgLayer,
+    'sgdtRandomMarkFgBg': TransformerEncoderRandomMarkFgBgLayer,
+
+    # teacher student both in a single encoder layer
+    'parallelSTECMarkFgBgVFreezeAll': TransformerEncoderLayerSTMarkFgBgShareQVFreezeAllExceptWK,
+    'parallelSTECMarkFgBgShareVNoFreeze': TransformerEncoderLayerSTMarkFgBgShareVNoFreeze,
+    'parallelSTECShareSGDTUpdateKAttn': TransformerEncoderLayerSTShareSGDTUpdateKAttn,
+    'parallelSTECSGDTShareVNoFreeze': TransformerEncoderLayerSTSGDTShareVNoFreeze,
+    'parallelSTECSGDTShareVOutProjFFN': TransformerEncoderLayerSTSGDTShareVOutProjFFN,
+    'parallelSTECSGDTShareVFFN': TransformerEncoderLayerSTSGDTShareVFFN,
+    'parallelSTECSGDTShareAtnOutProjFFN': TransformerEncoderLayerSTSGDTShareAttnOutProjFFN,
+
+    'parallelsMLPQKShareVOutProjFFN': TransformerEncoderLayersMLPQKShareVOutProjFFN,
+    'parallelMarkFg1Bg0QKShareVOutProjFFN': TransformerEncoderLayerMarkFg1Bg0QKShareVOutProjFFN,
 }
 
 
@@ -853,30 +1777,24 @@ class TransformerEncoder(nn.Module):
                     pos=pos * pos_scales,  # scaled pos is passed in
                     pre_calculated_attn=pre_calculated_attn,
                 )
-            elif type(layer).__name__ in [
-                # 'TransformerEncoderMarkFgBgLayer',
-                'TransformerEncoderRandomMarkFgBgLayer']:
+            elif type(layer).__name__ in ['TransformerEncoderMarkFgBgLayer', 'TransformerEncoderRandomMarkFgBgLayer']:
                 output, attn_map_logits = layer(
                     output, src_mask=mask,
                     src_key_padding_mask=src_key_padding_mask,
                     pos=pos * pos_scales,  # scaled pos is passed in
                     sgdt=sgdt,
                 )
-            elif type(layer).__name__ in [
-                # 'TransformerEncoderLayerSTMarkFgBgShareQVFreezeAllExceptWK',
-                # 'TransformerEncoderLayerSTMarkFgBgShareVNoFreeze',
-                # 'AblationTransformerEncoderOnlineShareSTAttnLayer',
+            elif type(layer).__name__ in ['TransformerEncoderLayerSTMarkFgBgShareQVFreezeAllExceptWK',
+                                          'TransformerEncoderLayerSTMarkFgBgShareVNoFreeze',
+                                          'TransformerEncoderLayerSTShareSGDTUpdateKAttn',
+                                          'TransformerEncoderLayerSTSGDTShareVNoFreeze',
+                                          'TransformerEncoderLayerSTSGDTShareVOutProjFFN',
+                                          'TransformerEncoderLayerSTSGDTShareVFFN',
 
-                'TransformerEncoderDualAttnLayerShareVOutProjFFN',
-                'TransformerEncoderDualAttnLayerShareVFFN',
-                'TransformerEncoderDualAttnLayerShareV',
-                'TransformerEncoderDualAttnLayerShareAttnOutProjFFN',
-                'TransformerEncoderDualAttnLayerShareAttnFFN',
-                'TransformerEncoderDualAttnLayerShareAttn',
-
-                'TransformerEncoderTripleAttnLayerShareOutProjFFN',
-                #  'TripleAttnShareOutProjFFN': TransformerEncoderTripleAttnLayerShareOutProjFFN,
-            ]:
+                                          'TransformerEncoderLayerSTSGDTShareAttnOutProjFFN',
+                                          'TransformerEncoderLayersMLPQKShareVOutProjFFN',
+                                          'TransformerEncoderLayerMarkFg1Bg0QKShareVOutProjFFN',
+                                          ]:
 
                 output, attn_map_logits, output_online_teacher, attn_map_online_teacher = layer(
                     output, src_mask=mask,
@@ -885,25 +1803,25 @@ class TransformerEncoder(nn.Module):
                     sgdt=sgdt,
                 )
 
-            # elif type(layer) in sgdt_layer_types:
-            #     # ['TransformerEncoderSGDTLayer', 'TransformerEncoderSGDTLayerV1']
-            #     # type(layer).__name__ in sgdt_layer_types
-            #     # SGDT layers (v0, v1) used for token adaption
-            #
-            #     output, attn_map_logits, sgdt_output, src_key_padding_mask = layer(
-            #         output, src_mask=mask,
-            #         src_key_padding_mask=src_key_padding_mask,
-            #         pos=pos * pos_scales,  # scaled pos is passed in
-            #         sgdt=sgdt,
-            #     )
-            #     # We must update pos here instead of inside the layer forward() if sgdt v0 layer is applied.
-            #     # Otherwise pos * pos_scales will be adapted not original pos.
-            #     # It is the original pos is expected for later layer and decoder, each pos_scales are applied
-            #     #  to original pos.
-            #     if 'adapted_pos' in sgdt_output and sgdt_output['adapted_pos']:
-            #         pos = extract_adapted_token_pos_embed(sgdt_output, pos=pos)
-            #
-            #     sgdt_output_list.append(sgdt_output)
+            elif type(layer) in sgdt_layer_types:
+                # ['TransformerEncoderSGDTLayer', 'TransformerEncoderSGDTLayerV1']
+                # type(layer).__name__ in sgdt_layer_types
+                # SGDT layers (v0, v1) used for token adaption
+
+                output, attn_map_logits, sgdt_output, src_key_padding_mask = layer(
+                    output, src_mask=mask,
+                    src_key_padding_mask=src_key_padding_mask,
+                    pos=pos * pos_scales,  # scaled pos is passed in
+                    sgdt=sgdt,
+                )
+                # We must update pos here instead of inside the layer forward() if sgdt v0 layer is applied.
+                # Otherwise pos * pos_scales will be adapted not original pos.
+                # It is the original pos is expected for later layer and decoder, each pos_scales are applied
+                #  to original pos.
+                if 'adapted_pos' in sgdt_output and sgdt_output['adapted_pos']:
+                    pos = extract_adapted_token_pos_embed(sgdt_output, pos=pos)
+
+                sgdt_output_list.append(sgdt_output)
             else:
                 raise NotImplementedError
                 # -------------------
@@ -918,8 +1836,8 @@ class TransformerEncoder(nn.Module):
                 encoder_output_list.append(dict(
                     feat=output if layer_id >= self.catch_encoder_output_from_layer_id else None,
                     attn_map_logits=attn_map_logits if layer_id >= self.catch_encoder_output_from_layer_id else None,
-                    output_online_teacher=output_online_teacher,  # could be tuple
-                    attn_map_online_teacher=attn_map_online_teacher, # could be tuple
+                    output_online_teacher=output_online_teacher,
+                    attn_map_online_teacher=attn_map_online_teacher,
                 )
                 )
             # encoder_output_list.append(output)
@@ -939,7 +1857,6 @@ class TransformerEncoder(nn.Module):
                 sgdt=None,
                 teacher_encoder_output_list=None
                 ):
-
         # process all encoder layers, so encoder_layer_ids=None
         output, sgdt_output_list, pos, src_key_padding_mask, encoder_output_list = self.forward_subset_encoder_layers(
             src=src, mask=mask, src_key_padding_mask=src_key_padding_mask, pos=pos, sgdt=sgdt,
@@ -2275,8 +3192,8 @@ SGDTDecoderLayerType = {
     'STMarkECFFNFeatureFgBgShareV': TransformerDecoderLayerSTMarkFgBgKShareV,
 
     # 'parallelSTECMarkFgBgShareVNoFreeze': TransformerEncoderLayerSTMarkFgBgShareVNoFreeze,
-    # 'parallelSTECShareSGDTUpdateKAttn': AblationTransformerEncoderOnlineShareSTAttnLayer,
-    # 'parallelSTECSGDTShareVNoFreeze': TransformerEncoderDualAttnLayerShareV,
+    # 'parallelSTECShareSGDTUpdateKAttn': TransformerEncoderLayerSTShareSGDTUpdateKAttn,
+    # 'parallelSTECSGDTShareVNoFreeze': TransformerEncoderLayerSTSGDTShareVNoFreeze,
 }
 
 
@@ -2402,118 +3319,6 @@ class TransformerDecoder(nn.Module):
 
         return ref_points, reference_points, intermediate
 
-    def distillation_forward(self, tgt, memory,
-                             tgt_mask: Optional[Tensor] = None,
-                             memory_mask: Optional[Tensor] = None,
-                             tgt_key_padding_mask: Optional[Tensor] = None,
-                             memory_key_padding_mask: Optional[Tensor] = None,
-                             pos: Optional[Tensor] = None,
-                             refpoints_unsigmoid: Optional[Tensor] = None,  # num_queries, bs, 2
-
-                             sgdt=None,
-                             teacher_decoder_out_list=None,
-                             student_decoder_out_list=None,
-                             ):
-        # use the pos, reference_points, query_pos, query_sine_embed from teacher.
-
-        assert teacher_decoder_out_list is not None and student_decoder_out_list is not None
-        # layer_ids = self.sgdt.args.with_pred_distill_decoder_layer_ids
-
-        # output = tgt
-        intermediate = []
-        # reference_points = refpoints_unsigmoid.sigmoid()
-        # ref_points = [reference_points]
-        ref_points = [x['reference_points'] for x in teacher_decoder_out_list]
-
-        # import ipdb; ipdb.set_trace()
-
-        for layer_id, layer in enumerate(self.layers):
-            # obj_center = reference_points[..., :self.query_dim]  # [num_queries, batch_size, 2]
-            # # get sine embedding for the query vector
-            # query_sine_embed = gen_sineembed_for_position(obj_center)
-            # query_pos = self.ref_point_head(query_sine_embed)
-
-            # # For the first decoder layer, we do not apply transformation over p_s
-            # if self.query_scale_type != 'fix_elewise':
-            #     if layer_id == 0:
-            #         pos_transformation = 1
-            #     else:
-            #         pos_transformation = self.query_scale(output)
-            # else:
-            #     pos_transformation = self.query_scale.weight[layer_id]
-            #
-            # # apply transformation
-            # query_sine_embed = query_sine_embed[..., :self.d_model] * pos_transformation  # torch.Size([320, 2, 256])
-
-            # # modulated HW attentions
-            # if self.modulate_hw_attn:
-            #     refHW_cond = self.ref_anchor_head(output).sigmoid()  # nq, bs, 2
-            #     query_sine_embed[..., self.d_model // 2:] *= (refHW_cond[..., 0] / obj_center[..., 2]).unsqueeze(-1)
-            #     query_sine_embed[..., :self.d_model // 2] *= (refHW_cond[..., 1] / obj_center[..., 3]).unsqueeze(-1)
-
-            # query_pos and output (decoder feature) are used for self_attn, query_sine_embed not used for self_attn
-            # pos is used for k_pos in cross attention (k_pos = self.ca_kpos_proj(pos))
-            # query_sine_embed is used in ca for q_pos in default [self.ca_qpos_sine_proj(query_sine_embed)]
-
-            #             query_pos = teacher_decoder_out_list['query_pos']
-
-            # decoder_out_list[layer_id].update({'pos': pos, 'query_pos': query_pos,
-            #                                    'query_sine_embed': query_sine_embed,
-            #                                    'tgt': output,
-            #                                    'memory': memory,
-            #                                    'reference_points': reference_points,
-            #                                    })
-            # only decoder features and encoder features are different. Pos are same as sine positional encoding used.
-            output = layer(tgt=student_decoder_out_list[layer_id]['tgt'],
-                           memory=student_decoder_out_list[layer_id]['memory'],
-                           tgt_mask=tgt_mask,
-                           memory_mask=memory_mask,
-                           tgt_key_padding_mask=tgt_key_padding_mask,
-                           memory_key_padding_mask=memory_key_padding_mask,
-                           pos=student_decoder_out_list[layer_id]['pos'],  # TODO: check this should come from t or s?
-                           query_pos=teacher_decoder_out_list[layer_id]['query_pos'],
-                           query_sine_embed=teacher_decoder_out_list[layer_id]['query_sine_embed'],
-                           is_first=(layer_id == 0),
-                           sgdt=sgdt,
-                           )
-
-            # # iter update
-            # if self.bbox_embed is not None:
-            #     if self.bbox_embed_diff_each_layer:
-            #         tmp = self.bbox_embed[layer_id](output)
-            #     else:
-            #         tmp = self.bbox_embed(output)
-            #     # import ipdb; ipdb.set_trace()
-            #     tmp[..., :self.query_dim] += inverse_sigmoid(reference_points)
-            #     new_reference_points = tmp[..., :self.query_dim].sigmoid()
-            #     if layer_id != self.num_layers - 1:
-            #         ref_points.append(new_reference_points)
-            #     reference_points = new_reference_points.detach()
-
-            if self.return_intermediate:
-                intermediate.append(self.norm(output))
-
-        if self.norm is not None:
-            output = self.norm(output)
-            if self.return_intermediate:
-                intermediate.pop()
-                intermediate.append(output)
-
-        if self.return_intermediate:
-            if self.bbox_embed is not None:
-                return [
-                    torch.stack(intermediate).transpose(1, 2),
-                    torch.stack(ref_points).transpose(1, 2),
-                ]
-            else:
-                reference_points = ref_points[-1]
-                return [
-                    torch.stack(intermediate).transpose(1, 2),
-                    reference_points.unsqueeze(0).transpose(1, 2)
-                ]
-
-        return output.unsqueeze(0)
-
     def forward(self, tgt, memory,
                 tgt_mask: Optional[Tensor] = None,
                 memory_mask: Optional[Tensor] = None,
@@ -2523,24 +3328,7 @@ class TransformerDecoder(nn.Module):
                 refpoints_unsigmoid: Optional[Tensor] = None,  # num_queries, bs, 2
 
                 sgdt=None,
-                teacher_decoder_out_list=None,
-                return_decoder_out=False,
-                student_decoder_out_list=None,
                 ):
-        if teacher_decoder_out_list is not None and student_decoder_out_list is not None:
-            return self.distillation_forward(
-                tgt=tgt, memory=memory,
-                tgt_mask=tgt_mask,
-                memory_mask=memory_mask,
-                tgt_key_padding_mask=tgt_key_padding_mask,
-                memory_key_padding_mask=memory_key_padding_mask,
-                pos=pos,
-                refpoints_unsigmoid=refpoints_unsigmoid,
-                sgdt=sgdt,
-                teacher_decoder_out_list=teacher_decoder_out_list,
-                student_decoder_out_list=student_decoder_out_list,
-            )
-
         output = tgt
 
         intermediate = []
@@ -2548,7 +3336,6 @@ class TransformerDecoder(nn.Module):
         ref_points = [reference_points]
 
         # import ipdb; ipdb.set_trace()
-        decoder_out_list = [{} for _ in range(len(self.layers))]
 
         for layer_id, layer in enumerate(self.layers):
             obj_center = reference_points[..., :self.query_dim]  # [num_queries, batch_size, 2]
@@ -2574,19 +3361,6 @@ class TransformerDecoder(nn.Module):
                 query_sine_embed[..., self.d_model // 2:] *= (refHW_cond[..., 0] / obj_center[..., 2]).unsqueeze(-1)
                 query_sine_embed[..., :self.d_model // 2] *= (refHW_cond[..., 1] / obj_center[..., 3]).unsqueeze(-1)
 
-            # ============
-            # pos is fixed sine position encoding, not learnable.
-            decoder_out_list[layer_id].update({'pos': pos, 'query_pos': query_pos,
-                                               'query_sine_embed': query_sine_embed,
-                                               'tgt': output,
-                                               'memory': memory,
-                                               'reference_points': reference_points,
-                                               })
-            # ============
-
-            # query_pos and output (decoder feature) are used for self_attn, query_sine_embed not used for self_attn
-            # pos is used for k_pos in cross attention (k_pos = self.ca_kpos_proj(pos))
-            # query_sine_embed is used in ca for q_pos in default [self.ca_qpos_sine_proj(query_sine_embed)]
             output = layer(output, memory, tgt_mask=tgt_mask,
                            memory_mask=memory_mask,
                            tgt_key_padding_mask=tgt_key_padding_mask,
@@ -2618,23 +3392,19 @@ class TransformerDecoder(nn.Module):
                 intermediate.pop()
                 intermediate.append(output)
 
-        additional_out_list = [decoder_out_list] if return_decoder_out else []
         if self.return_intermediate:
             if self.bbox_embed is not None:
                 return [
-                           torch.stack(intermediate).transpose(1, 2),
-                           torch.stack(ref_points).transpose(1, 2),
-                       ] + additional_out_list
+                    torch.stack(intermediate).transpose(1, 2),
+                    torch.stack(ref_points).transpose(1, 2),
+                ]
             else:
                 return [
-                           torch.stack(intermediate).transpose(1, 2),
-                           reference_points.unsqueeze(0).transpose(1, 2)
-                       ] + additional_out_list
+                    torch.stack(intermediate).transpose(1, 2),
+                    reference_points.unsqueeze(0).transpose(1, 2)
+                ]
 
-        if return_decoder_out:
-            return output.unsqueeze(0), decoder_out_list
-        else:
-            return output.unsqueeze(0)
+        return output.unsqueeze(0)
 
 
 # class TransformerDecoderStandAlone(nn.Module):  ## TODO
@@ -3692,8 +4462,7 @@ class Transformer(nn.Module):
         # flatten NxCxHxW to HWxNxC # h= 25, w = 32
         bs, c, h, w = src.shape  # torch.Size([2, 256, 25, 32])
         src = src.flatten(2).permute(2, 0, 1)
-        pos_embed = pos_embed.flatten(2).permute(2, 0,
-                                                 1)  # encoder PE, sing, torch.Size([2, 256, 25, 32]) -> torch.Size([800, 2, 256])
+        pos_embed = pos_embed.flatten(2).permute(2, 0, 1)  # encoder PE, sing, torch.Size([2, 256, 25, 32]) -> torch.Size([800, 2, 256])
         # refpoint_embed = refpoint_embed.unsqueeze(1).repeat(1, bs, 1)
 
         # -------------------------
@@ -3706,18 +4475,10 @@ class Transformer(nn.Module):
 
         # mask is used as src_key_padding_mask not mask even encoder has 'mask' input.
         skip_teacher_model_decoder_forward = kwargs.pop('skip_teacher_model_decoder_forward', False)
-        # {'teacher_encoder_decoder_out_dict': None}
 
-        teacher_encoder_decoder_out_dict = kwargs.pop('teacher_encoder_decoder_out_dict', None)
-        teacher_encoder_output_list = None
-        if teacher_encoder_decoder_out_dict is not None and \
-                'teacher_encoder_output_list' in kwargs['teacher_encoder_decoder_out_dict']:
-            teacher_encoder_output_list = kwargs['teacher_encoder_decoder_out_dict']['teacher_encoder_output_list']
-
-        # Encoder needs teacher_encoder_output_list not teacher_encoder_decoder_out_dict
         memory, sgdt_output_list, pos_embed, mask, encoder_output_list = self.encoder(
             src, src_key_padding_mask=mask, pos=pos_embed,
-            sgdt=sgdt, teacher_encoder_output_list=teacher_encoder_output_list,  **kwargs,
+            sgdt=sgdt, **kwargs,
         )
 
         # If this model is used as teacher, sometimes we do not need to go through decoder.
@@ -3740,27 +4501,11 @@ class Transformer(nn.Module):
         #     # memory: N, B, C torch.Size([756, 2, 256]);  sgdt['fg_gt']: N, B shape torch.Size([756, 2])
         #     memory[:, :, -1] = memory[:, :, -1] * 0 + sgdt.sgdt_targets['fg_gt'].type(memory.dtype)
         # tgt=input_query_label,  # torch.Size([320, 2, 256])
-        if sgdt.args.is_teacher_model:
-            hs, references, decoder_out_list = self.decoder(
-                tgt, memory, tgt_mask=attn_mask, memory_key_padding_mask=mask,
-                pos=pos_embed, refpoints_unsigmoid=refpoint_embed,
-                sgdt=sgdt, return_decoder_out=True,
-            )
-            encoder_decoder_out_dict = dict(
-                encoder_output_list=encoder_output_list,
-                decoder_out_list=decoder_out_list,
-            )
-        else:
-            hs, references = self.decoder(
-                tgt, memory, tgt_mask=attn_mask, memory_key_padding_mask=mask,
-                pos=pos_embed, refpoints_unsigmoid=refpoint_embed,
-                sgdt=sgdt, return_decoder_out=False,
-            )
-            encoder_decoder_out_dict = dict(
-                encoder_output_list=encoder_output_list,
-                # decoder_out_list=decoder_out_list,
-            )
-        return hs, references, sgdt_output_list, encoder_decoder_out_dict
+        hs, references = self.decoder(tgt, memory, tgt_mask=attn_mask, memory_key_padding_mask=mask,
+                                      pos=pos_embed, refpoints_unsigmoid=refpoint_embed,
+                                      sgdt=sgdt,
+                                      )
+        return hs, references, sgdt_output_list, encoder_output_list
 
 
 class TransformerParallel(Transformer):
@@ -3844,11 +4589,7 @@ class TransformerParallel(Transformer):
         )
         sgdt_output_list += sgdt_output_list_decoder
         encoder_output_list += encoder_output_list_decoder
-        encoder_decoder_out_dict = dict(
-            encoder_output_list=encoder_output_list,
-            # decoder_out_list=decoder_out_list,
-        )
-        return hs, references, sgdt_output_list, encoder_decoder_out_dict
+        return hs, references, sgdt_output_list, encoder_output_list
 
 
 class TransformerFeatDistill(Transformer):
@@ -3935,11 +4676,7 @@ class TransformerFeatDistill(Transformer):
         )
         sgdt_output_list += sgdt_output_list_decoder
         encoder_output_list += encoder_output_list_decoder
-        encoder_decoder_out_dict = dict(
-            encoder_output_list=encoder_output_list,
-            # decoder_out_list=decoder_out_list,
-        )
-        return hs, references, sgdt_output_list, encoder_decoder_out_dict
+        return hs, references, sgdt_output_list, encoder_output_list
 
 
 class TransformerAttnODE(Transformer):
@@ -4009,11 +4746,7 @@ class TransformerAttnODE(Transformer):
             teacher_memory=teacher_memory,
         )
 
-        encoder_decoder_out_dict = dict(
-            encoder_output_list=encoder_output_list,
-            # decoder_out_list=decoder_out_list,
-        )
-        return hs, references, sgdt_output_list, encoder_decoder_out_dict
+        return hs, references, sgdt_output_list, encoder_output_list
 
 
 class TransformerAttnODD(Transformer):
@@ -4082,11 +4815,7 @@ class TransformerAttnODD(Transformer):
             # class_embed=class_embed,
             # encoder=self.encoder,
         )
-        encoder_decoder_out_dict = dict(
-            encoder_output_list=encoder_output_list,
-            # decoder_out_list=decoder_out_list,
-        )
-        return hs, references, sgdt_output_list, encoder_decoder_out_dict
+        return hs, references, sgdt_output_list, encoder_output_list
 
 
 class TransformerDoubleHead(nn.Module):
@@ -4256,11 +4985,7 @@ class TransformerDoubleHead(nn.Module):
                                             sgdt=sgdt,
                                             )  # torch.Size([4, 2, 375, 256])  torch.Size([4, 2, 375, 4])
         hs, references = torch.cat([hs_s, hs_t], dim=0), torch.cat([references_s, references_t], dim=0)
-        encoder_decoder_out_dict = dict(
-            encoder_output_list=encoder_output_list,
-            # decoder_out_list=decoder_out_list,
-        )
-        return hs, references, sgdt_output_list, encoder_decoder_out_dict
+        return hs, references, sgdt_output_list, encoder_output_list
 
 
 class TransformerShareDoubleHead(nn.Module):
@@ -4415,90 +5140,14 @@ class TransformerShareDoubleHead(nn.Module):
                                       pos=pos_embed, refpoints_unsigmoid=refpoint_embed,
                                       sgdt=sgdt,
                                       )
-        decoder_out_list = None
+
         if not (sgdt.freeze_attn_online_encoder_distillation and self.training):
-            hs_t, references_t, decoder_out_list = self.decoder(
-                tgt, teacher_memory, tgt_mask=attn_mask,
-                memory_key_padding_mask=mask,
-                pos=pos_embed, refpoints_unsigmoid=refpoint_embed,
-                sgdt=sgdt, return_decoder_out=True,
-            )  # torch.Size([4, 2, 375, 256])  torch.Size([4, 2, 375, 4])
-
-            # self.bbox_embed may be per level (self.bbox_embed[lvl](hs[lvl])), so I cannot put everything
-            # into a single tensor. So the following line is deprecated.
-            # hs, references = torch.cat([hs, hs_t], dim=0), torch.cat([references, references_t], dim=0)
-            hs, references = [hs, hs_t], [references, references_t]
-        encoder_decoder_out_dict = dict(
-            encoder_output_list=encoder_output_list,
-            decoder_out_list=decoder_out_list,
-        )
-        return hs, references, sgdt_output_list, encoder_decoder_out_dict
-
-
-class TransformerShareTripleHead(TransformerShareDoubleHead):
-
-    def forward(self, src, mask, refpoint_embed, pos_embed, tgt, attn_mask=None,
-                sgdt=None,
-                mask_dict=None,  # mask_dict=mask_dict,
-                class_embed=None,  # class_embed=class_embed
-                **kwargs,
-                ):
-        # flatten NxCxHxW to HWxNxC # h= 25, w = 32
-        bs, c, h, w = src.shape  # torch.Size([2, 256, 25, 32])
-        src = src.flatten(2).permute(2, 0, 1)
-        pos_embed = pos_embed.flatten(2).permute(2, 0, 1)  # torch.Size([2, 256, 25, 32]) -> torch.Size([800, 2, 256])
-        # refpoint_embed = refpoint_embed.unsqueeze(1).repeat(1, bs, 1)
-
-        mask = mask.flatten(1)  # torch.Size([2, 21, 30]) -> torch.Size([2, 630]), src = torch.Size([630, 2, 256])
-
-        # do not accept the adapted pos_embed, mask from encoder as zeros pos_embed might be fed
-        memory, sgdt_output_list, pos_embed, mask, encoder_output_list = self.encoder(
-            src, src_key_padding_mask=mask, pos=pos_embed,
-            sgdt=sgdt,
-        )
-
-        assert 'output_online_teacher' in encoder_output_list[-1]
-        teachers_memory = encoder_output_list[-1]['output_online_teacher']
-        assert isinstance(teachers_memory, (list, tuple))
-
-        if self.num_patterns > 0:
-            l = tgt.shape[0]
-            tgt[l - self.num_queries * self.num_patterns:] += \
-                self.patterns.weight[:, None, None, :].repeat(1, self.num_queries, bs, 1).flatten(0, 1)
-
-        # hs, references = self.decoder(tgt, memory, tgt_mask=attn_mask, memory_key_padding_mask=mask,
-        #                               pos=pos_embed, refpoints_unsigmoid=refpoint_embed)
-        hs, references = self.decoder(tgt, memory, tgt_mask=attn_mask, memory_key_padding_mask=mask,
-                                      pos=pos_embed, refpoints_unsigmoid=refpoint_embed,
-                                      sgdt=sgdt,
-                                      )
-        decoder_out_list = []  # None
-        if not (sgdt.freeze_attn_online_encoder_distillation and self.training):
-
-            for k, teacher_memory in enumerate(teachers_memory):
-                hs_t, references_t, decoder_out_list_tmp = self.decoder(
-                    tgt, teacher_memory, tgt_mask=attn_mask,
-                    memory_key_padding_mask=mask,
-                    pos=pos_embed, refpoints_unsigmoid=refpoint_embed,
-                    sgdt=sgdt, return_decoder_out=True,
-                )  # torch.Size([4, 2, 375, 256])  torch.Size([4, 2, 375, 4])
-
-                # self.bbox_embed may be per level (self.bbox_embed[lvl](hs[lvl])), so I cannot put everything
-                # into a single tensor. So the following line is deprecated.
-                # hs, references = torch.cat([hs, hs_t], dim=0), torch.cat([references, references_t], dim=0)
-                if k == 0:
-                    hs, references = [hs, hs_t], [references, references_t]
-                    decoder_out_list = [decoder_out_list, decoder_out_list_tmp]
-                else:
-                    hs.append(hs_t)
-                    references.append(references_t)
-                    decoder_out_list.append(decoder_out_list_tmp)
-
-        encoder_decoder_out_dict = dict(
-            encoder_output_list=encoder_output_list,
-            decoder_out_list=decoder_out_list,
-        )
-        return hs, references, sgdt_output_list, encoder_decoder_out_dict
+            hs_t, references_t = self.decoder(tgt, teacher_memory, tgt_mask=attn_mask, memory_key_padding_mask=mask,
+                                              pos=pos_embed, refpoints_unsigmoid=refpoint_embed,
+                                              sgdt=sgdt,
+                                              )  # torch.Size([4, 2, 375, 256])  torch.Size([4, 2, 375, 4])
+            hs, references = torch.cat([hs, hs_t], dim=0), torch.cat([references, references_t], dim=0)
+        return hs, references, sgdt_output_list, encoder_output_list
 
 
 class TransformerDualAttn(Transformer):
@@ -4564,115 +5213,17 @@ class TransformerDualAttn(Transformer):
             sgdt=sgdt,
         )
         encoder_output_list[-1]['decoder_distillation_out_pair'] = distillation_out_pair
-        encoder_decoder_out_dict = dict(
-            encoder_output_list=encoder_output_list,
-            # decoder_out_list=decoder_out_list,
-        )
-        return hs, references, sgdt_output_list, encoder_decoder_out_dict
-
-
-class TransformerPredictionDistill(Transformer):
-    """
-    Test prediction distillation
-    Teacher and student are given the same good 'teacher object query' in the decoder
-    """
-
-    def __init__(self, d_model=512, nhead=8, num_queries=300, num_decoder_layers=6, dim_feedforward=2048, dropout=0.1,
-                 activation="relu", normalize_before=False, return_intermediate_dec=False, query_dim=4,
-                 keep_query_pos=False, query_scale_type='cond_elewise', num_patterns=0, modulate_hw_attn=True,
-                 bbox_embed_diff_each_layer=False,
-                 encoder_layer_config=None,
-                 decoder_layer_config=None,
-                 align_encoder_decoder_layers_num=None,
-                 ):
-        super().__init__(d_model=d_model, nhead=nhead, num_queries=num_queries,
-                         # num_encoder_layers=num_encoder_layers,
-                         num_decoder_layers=num_decoder_layers, dim_feedforward=dim_feedforward, dropout=dropout,
-                         activation=activation, normalize_before=normalize_before,
-                         return_intermediate_dec=return_intermediate_dec, query_dim=query_dim,
-                         keep_query_pos=keep_query_pos, query_scale_type=query_scale_type,
-                         num_patterns=num_patterns, modulate_hw_attn=modulate_hw_attn,
-                         bbox_embed_diff_each_layer=bbox_embed_diff_each_layer,
-
-                         encoder_layer_config=encoder_layer_config,
-                         encoder_decoder_config=None,  # None means the normal encoder decoder blocks.
-                         decoder_layer_config=decoder_layer_config,
-                         )
-
-    def forward(self, src, mask, refpoint_embed, pos_embed, tgt, attn_mask=None,
-                sgdt=None,
-                mask_dict=None,  # mask_dict=mask_dict,
-                class_embed=None,  # class_embed=class_embed
-                **kwargs,
-                ):
-        # flatten NxCxHxW to HWxNxC # h= 25, w = 32
-        bs, c, h, w = src.shape  # torch.Size([2, 256, 25, 32])
-        src = src.flatten(2).permute(2, 0, 1)
-        pos_embed = pos_embed.flatten(2).permute(2, 0, 1)  # torch.Size([2, 256, 25, 32]) -> torch.Size([800, 2, 256])
-        # refpoint_embed = refpoint_embed.unsqueeze(1).repeat(1, bs, 1)
-
-        mask = mask.flatten(1)  # torch.Size([2, 21, 30]) -> torch.Size([2, 630]), src = torch.Size([630, 2, 256])
-
-        # do not accept the adapted pos_embed, mask from encoder as zeros pos_embed might be fed
-        memory, sgdt_output_list, pos_embed, mask, encoder_output_list = self.encoder(
-            src, src_key_padding_mask=mask, pos=pos_embed,
-            sgdt=sgdt,
-        )
-
-        if self.num_patterns > 0:
-            l = tgt.shape[0]
-            tgt[l - self.num_queries * self.num_patterns:] += \
-                self.patterns.weight[:, None, None, :].repeat(1, self.num_queries, bs, 1).flatten(0, 1)
-
-        # hs, references = self.decoder(tgt, memory, tgt_mask=attn_mask, memory_key_padding_mask=mask,
-        #                               pos=pos_embed, refpoints_unsigmoid=refpoint_embed)
-
-        # Normal decoder block
-        hs, references, decoder_out_list = self.decoder(
-            tgt=tgt, memory=memory,
-            tgt_mask=attn_mask,
-            memory_key_padding_mask=mask,
-            pos=pos_embed, refpoints_unsigmoid=refpoint_embed,
-            sgdt=sgdt,
-            return_decoder_out=True,
-        )
-        encoder_decoder_out_dict = dict(
-            encoder_output_list=encoder_output_list,
-            decoder_out_list=decoder_out_list,
-        )
-
-        teacher_encoder_decoder_out_dict = kwargs.get('teacher_encoder_decoder_out_dict', None)
-        if teacher_encoder_decoder_out_dict is not None:
-            # forward using the same decoder block but given the teacher object query, query_sine_embed
-            hs_, references_ = self.decoder(
-                tgt=tgt, memory=memory,
-                tgt_mask=attn_mask,
-                memory_key_padding_mask=mask,
-                pos=pos_embed, refpoints_unsigmoid=refpoint_embed,
-                sgdt=sgdt,
-                teacher_decoder_out_list=teacher_encoder_decoder_out_dict['decoder_out_list'],
-                student_decoder_out_list=decoder_out_list,
-            )
-            encoder_decoder_out_dict.update(
-                dict(distillation_hs=hs_, distillation_references=references_)
-            )
-
-        # encoder_output_list[-1]['decoder_distillation_out_pair'] = distillation_out_pair
-        return hs, references, sgdt_output_list, encoder_decoder_out_dict
+        return hs, references, sgdt_output_list, encoder_output_list
 
 
 def build_transformer(args):
-    if args.transformer_type == 'double_head_transformer':
+    if args.double_head_transformer:
         transformer = TransformerDoubleHead
-    elif args.transformer_type == 'prediction_distill_transformer':
-        transformer = TransformerPredictionDistill
-    elif args.transformer_type == 'share_double_head_transformer':
+    elif args.share_double_head_transformer:
         transformer = TransformerShareDoubleHead
-    elif args.transformer_type == 'share_triple_head_transformer':
-        transformer = TransformerShareTripleHead
-    elif args.transformer_type == 'online_decoder_self_distill_transformer':
+    elif args.online_decoder_self_distill_transformer:
         transformer = TransformerAttnODD
-    elif args.transformer_type == 'dual_attn_transformer':
+    elif args.dual_attn_transformer:
         transformer = TransformerDualAttn
     elif args.feature_attn_distillation is not None:
         if args.feature_attn_distillation == 'parallel':

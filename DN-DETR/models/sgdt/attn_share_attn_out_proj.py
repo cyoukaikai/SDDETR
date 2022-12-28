@@ -27,7 +27,7 @@ from torch.nn.functional import linear, pad, softmax, dropout
 
 # temporarly comment out .is_nested
 from .attn import _mha_shape_check
-from .self_attn import _linear
+
 
 # ============================
 # (w_q, w_k, w_v) and (b_q, b_k, b_v) are packed, we cannot set requires_grad = False for only
@@ -36,7 +36,7 @@ from .self_attn import _linear
 # ============================
 
 
-class MultiheadDualAttention(Module):
+class MultiheadAttentionShareAttnOutProj(Module):
     r"""Allows the model to jointly attend to information
     from different representation subspaces as described in the paper:
     `Attention Is All You Need <https://arxiv.org/abs/1706.03762>`_.
@@ -87,17 +87,14 @@ class MultiheadDualAttention(Module):
     bias_v: Optional[torch.Tensor]
 
     def __init__(self, embed_dim, num_heads, dropout=0., bias=True, add_bias_kv=False, add_zero_attn=False,
-                 kdim=None, vdim=None, batch_first=False, device=None, dtype=None,
-                 share_q=False, share_k=False, share_v=False, share_attn_map=False,
-                 share_out_proj=False,
-                 ) -> None:
+                 kdim=None, vdim=None, batch_first=False, device=None, dtype=None) -> None:
         factory_kwargs = {'device': device, 'dtype': dtype}
         super().__init__()
 
         self.embed_dim = embed_dim
         self.kdim = kdim if kdim is not None else embed_dim
         self.vdim = vdim if vdim is not None else embed_dim
-        # self._qkv_same_embed_dim = self.kdim == embed_dim and self.vdim == embed_dim
+        self._qkv_same_embed_dim = self.kdim == embed_dim and self.vdim == embed_dim
 
         self.num_heads = num_heads
         self.dropout = dropout
@@ -105,100 +102,65 @@ class MultiheadDualAttention(Module):
         self.head_dim = embed_dim // num_heads
         assert self.head_dim * num_heads == self.embed_dim, "embed_dim must be divisible by num_heads"
 
-        self.q_proj_weight = Parameter(torch.empty((embed_dim, embed_dim), **factory_kwargs))
-        self.k_proj_weight = Parameter(torch.empty((embed_dim, self.kdim), **factory_kwargs))
-        self.v_proj_weight = Parameter(torch.empty((embed_dim, self.vdim), **factory_kwargs))
+        if not self._qkv_same_embed_dim:
+            self.q_proj_weight = Parameter(torch.empty((embed_dim, embed_dim), **factory_kwargs))
+            self.k_proj_weight = Parameter(torch.empty((embed_dim, self.kdim), **factory_kwargs))
+            self.v_proj_weight = Parameter(torch.empty((embed_dim, self.vdim), **factory_kwargs))
+            # ---------
 
-        # ------------------------------------
-        self.share_q = share_q
-        self.share_k = share_k
-        self.share_v = share_v
-        self.share_attn_map = share_attn_map
-        self.share_out_proj = share_out_proj
-
-        self.q_teacher_proj_weight = self.k_teacher_proj_weight = self.v_teacher_proj_weight = None
-        if not (self.share_q or self.share_attn_map):
-            self.q_teacher_proj_weight = Parameter(torch.empty((embed_dim, embed_dim), **factory_kwargs))
-        if not (self.share_k or self.share_attn_map):
-            self.k_teacher_proj_weight = Parameter(torch.empty((embed_dim, self.kdim), **factory_kwargs))
-        if not self.share_v:
             self.v_teacher_proj_weight = Parameter(torch.empty((embed_dim, self.vdim), **factory_kwargs))
+            # ---------
+            self.register_parameter('in_proj_weight', None)
+        else:  # go here
+            # self.in_proj_weight = Parameter(torch.empty((3 * embed_dim, embed_dim), **factory_kwargs))
+            self.in_proj_weight = Parameter(torch.empty((4 * embed_dim, embed_dim), **factory_kwargs))
+            self.register_parameter('q_proj_weight', None)
+            self.register_parameter('k_proj_weight', None)
+            self.register_parameter('v_proj_weight', None)
 
-        self.q_in_proj_bias = self.k_in_proj_bias = self.v_in_proj_bias = None
-        self.q_teacher_in_proj_bias = self.k_teacher_in_proj_bias = self.v_teacher_in_proj_bias = None
-
+            # ---------
+            self.register_parameter('v_teacher_proj_weight', None)
         if bias:
-            self.q_in_proj_bias = Parameter(torch.empty(embed_dim, **factory_kwargs))
-            self.k_in_proj_bias = Parameter(torch.empty(embed_dim, **factory_kwargs))
-            self.v_in_proj_bias = Parameter(torch.empty(embed_dim, **factory_kwargs))
-
-            if not (self.share_q or self.share_attn_map):
-                self.q_teacher_in_proj_bias = Parameter(torch.empty(embed_dim, **factory_kwargs))
-            if not (self.share_k or self.share_attn_map):
-                self.k_teacher_in_proj_bias = Parameter(torch.empty(embed_dim, **factory_kwargs))
-            if not self.share_v:
-                self.v_teacher_in_proj_bias = Parameter(torch.empty(embed_dim, **factory_kwargs))
-
-        self.out_proj = NonDynamicallyQuantizableLinear(embed_dim, embed_dim, bias=bias, **factory_kwargs)
-
-        if self.share_out_proj:
-            self.out_proj_teacher = None
+            # self.in_proj_bias = Parameter(torch.empty(3 * embed_dim, **factory_kwargs))
+            self.in_proj_bias = Parameter(torch.empty(4 * embed_dim, **factory_kwargs))
         else:
-            self.out_proj_teacher = NonDynamicallyQuantizableLinear(embed_dim, embed_dim, bias=bias, **factory_kwargs)
+            self.register_parameter('in_proj_bias', None)
+        self.out_proj = NonDynamicallyQuantizableLinear(embed_dim, embed_dim, bias=bias, **factory_kwargs)
+        # self.out_proj_teacher = NonDynamicallyQuantizableLinear(embed_dim, embed_dim, bias=bias, **factory_kwargs)
 
         if add_bias_kv:
             self.bias_k = Parameter(torch.empty((1, 1, embed_dim), **factory_kwargs))
             self.bias_v = Parameter(torch.empty((1, 1, embed_dim), **factory_kwargs))
 
-            self.bias_k_teacher = Parameter(torch.empty((1, 1, embed_dim), **factory_kwargs))
             self.bias_v_teacher = Parameter(torch.empty((1, 1, embed_dim), **factory_kwargs))
         else:
             # self.bias_k = self.bias_v = None
-            self.bias_k = self.bias_v = self.bias_k_teacher = self.bias_v_teacher = None
+            self.bias_k = self.bias_v = self.bias_v_teacher = None
 
         self.add_zero_attn = add_zero_attn
 
         self._reset_parameters()
 
     def _reset_parameters(self):
+        if self._qkv_same_embed_dim:
+            xavier_uniform_(self.in_proj_weight)
+        else:
+            xavier_uniform_(self.q_proj_weight)
+            xavier_uniform_(self.k_proj_weight)
+            xavier_uniform_(self.v_proj_weight)
+            xavier_uniform_(self.v_teacher_proj_weight)
 
-        def _init_proj_weight(proj_weight):
-            if proj_weight is not None:
-                xavier_uniform_(proj_weight)
-
-        _init_proj_weight(self.q_proj_weight)
-        _init_proj_weight(self.k_proj_weight)
-        _init_proj_weight(self.v_proj_weight)
-        _init_proj_weight(self.q_teacher_proj_weight)
-        _init_proj_weight(self.k_teacher_proj_weight)
-        _init_proj_weight(self.v_teacher_proj_weight)
-
-        def _init_proj_bias(proj_bias):
-            if proj_bias is not None:
-                constant_(proj_bias, 0.)
-
-        if self.q_in_proj_bias is not None or self.k_in_proj_bias is not None or self.v_in_proj_bias is not None:
+        if self.in_proj_bias is not None:
+            constant_(self.in_proj_bias, 0.)
             constant_(self.out_proj.bias, 0.)
-            _init_proj_bias(self.q_in_proj_bias)
-            _init_proj_bias(self.k_in_proj_bias)
-            _init_proj_bias(self.v_in_proj_bias)
 
-        if self.q_teacher_in_proj_bias is not None or self.k_teacher_in_proj_bias is not None or \
-                self.v_teacher_in_proj_bias is not None:
-            if self.out_proj_teacher is not None:
-                constant_(self.out_proj_teacher.bias, 0.)
-
-            _init_proj_bias(self.q_teacher_in_proj_bias)
-            _init_proj_bias(self.k_teacher_in_proj_bias)
-            _init_proj_bias(self.v_teacher_in_proj_bias)
+            # constant_(self.out_proj_teacher.bias, 0.)
 
         if self.bias_k is not None:
             xavier_normal_(self.bias_k)
         if self.bias_v is not None:
             xavier_normal_(self.bias_v)
 
-        if self.bias_k_teacher is not None:
-            xavier_normal_(self.bias_k_teacher)
         if self.bias_v_teacher is not None:
             xavier_normal_(self.bias_v_teacher)
 
@@ -210,11 +172,21 @@ class MultiheadDualAttention(Module):
         super().__setstate__(state)
 
     def forward(self, query: Tensor, key: Tensor, value: Tensor,
-                query_teacher: Tensor,
-                key_teacher: Tensor,
+                # query_teacher: Tensor,
+                value_teacher: Tensor,
                 key_padding_mask: Optional[Tensor] = None,
                 need_weights: bool = True, attn_mask: Optional[Tensor] = None,
                 average_attn_weights: bool = True,
+
+                # pre_calculated_attn: Optional[Tensor] = None,
+                # freeze_wq: bool = False,
+                # freeze_wk: bool = False,
+                # freeze_wv: bool = False,
+                # freeze_wq_teacher: bool = False,
+                # freeze_wv_teacher: bool = False,
+                # freeze_v_teacher: bool = False,
+                # debug_st_attn_sweep_n_attn_heads: int = 0,
+                # token_sweep_mask: bool = None,
                 ):  # -> Tuple[Tensor, Optional[Tensor]]
         r"""
     Args:
@@ -323,22 +295,21 @@ class MultiheadDualAttention(Module):
             elif torch.is_grad_enabled() and any([x.requires_grad for x in tensor_args]):
                 why_not_fast_path = ("grad is enabled and at least one of query or the "
                                      "input/output projection weights or biases requires_grad")
-            assert why_not_fast_path
-            # if not why_not_fast_path:
-            #     return torch._native_multi_head_attention(
-            #         query,
-            #         key,
-            #         value,
-            #         self.embed_dim,
-            #         self.num_heads,
-            #         self.in_proj_weight,
-            #         self.in_proj_bias,
-            #         self.out_proj.weight,
-            #         self.out_proj.bias,
-            #         key_padding_mask if key_padding_mask is not None else attn_mask,
-            #         need_weights,
-            #         average_attn_weights,
-            #         1 if key_padding_mask is not None else 0 if attn_mask is not None else None)
+            if not why_not_fast_path:
+                return torch._native_multi_head_attention(
+                    query,
+                    key,
+                    value,
+                    self.embed_dim,
+                    self.num_heads,
+                    self.in_proj_weight,
+                    self.in_proj_bias,
+                    self.out_proj.weight,
+                    self.out_proj.bias,
+                    key_padding_mask if key_padding_mask is not None else attn_mask,
+                    need_weights,
+                    average_attn_weights,
+                    1 if key_padding_mask is not None else 0 if attn_mask is not None else None)
 
         # any_nested = query.is_nested or key.is_nested or value.is_nested
         # assert not any_nested, ("MultiheadAttention does not support NestedTensor outside of its fast path. " +
@@ -346,8 +317,6 @@ class MultiheadDualAttention(Module):
 
         if self.batch_first and is_batched:
             # TODO: not adapted yet
-            raise NotImplementedError
-
             # make sure that the transpose op does not affect the "is" property
             if key is value:
                 if query is key:
@@ -358,66 +327,185 @@ class MultiheadDualAttention(Module):
             else:
                 query, key, value = [x.transpose(1, 0) for x in (query, key, value)]
 
-        in_proj_weight = [self.q_proj_weight, self.k_proj_weight, self.v_proj_weight]
-        in_proj_bias = [self.q_in_proj_bias, self.k_in_proj_bias, self.v_in_proj_bias]
-        in_proj_weight_teacher = [self.q_teacher_proj_weight, self.k_teacher_proj_weight, self.v_teacher_proj_weight]
-        in_proj_bias_teacher = [self.q_teacher_in_proj_bias, self.k_teacher_in_proj_bias, self.v_teacher_in_proj_bias]
+        if not self._qkv_same_embed_dim:
+            attn_output, attn_output_weights, attn_output_weights_logits = multi_head_attention_forward(
+                query, key, value, value_teacher, self.embed_dim, self.num_heads,
+                self.in_proj_weight, self.in_proj_bias,
+                self.bias_k, self.bias_v, self.add_zero_attn,
+                self.dropout, self.out_proj.weight, self.out_proj.bias,
+                # out_proj_weight_teacher=self.out_proj_teacher.weight,
+                # out_proj_bias_teacher=self.out_proj_teacher.bias,
+                training=self.training,
+                key_padding_mask=key_padding_mask, need_weights=need_weights,
+                attn_mask=attn_mask, use_separate_proj_weight=True,
+                q_proj_weight=self.q_proj_weight, k_proj_weight=self.k_proj_weight,
+                v_proj_weight=self.v_proj_weight, average_attn_weights=average_attn_weights,
 
-        attn_output, attn_output_weights, attn_output_weights_logits = multi_head_attention_forward(
-            query, key, value, query_teacher, key_teacher, value_teacher, self.embed_dim, self.num_heads,
-            in_proj_weight=in_proj_weight, in_proj_bias=in_proj_bias,
-            in_proj_weight_teacher=in_proj_weight_teacher, in_proj_bias_teacher=in_proj_bias_teacher,
-            bias_k=self.bias_k, bias_v=self.bias_v, add_zero_attn=self.add_zero_attn,
-            dropout_p=self.dropout,
-            out_proj_weight=self.out_proj.weight, out_proj_bias=self.out_proj.bias,
-            out_proj_weight_teacher=self.out_proj_teacher.weight if self.out_proj_teacher is not None else None,
-            out_proj_bias_teacher=self.out_proj_teacher.bias if self.out_proj_teacher is not None else None,
-            training=self.training,
-            key_padding_mask=key_padding_mask, need_weights=need_weights,
-            attn_mask=attn_mask, average_attn_weights=average_attn_weights,
+                # pre_calculated_attn=pre_calculated_attn,
+                # freeze_wq=freeze_wq,
+                # freeze_wk=freeze_wk,
+                # freeze_wv=freeze_wv,
+                # freeze_wq_teacher=freeze_wq_teacher,
+                # freeze_wv_teacher=freeze_wv_teacher,
+                # freeze_v_teacher=freeze_v_teacher,
+                # debug_st_attn_sweep_n_attn_heads=debug_st_attn_sweep_n_attn_heads,
+                # token_sweep_mask=token_sweep_mask,
+            )
+            # attn_output, attn_output_weights = F.multi_head_attention_forward(
+            #     query, key, value, self.embed_dim, self.num_heads,
+            #     self.in_proj_weight, self.in_proj_bias,
+            #     self.bias_k, self.bias_v, self.add_zero_attn,
+            #     self.dropout, self.out_proj.weight, self.out_proj.bias,
+            #     training=self.training,
+            #     key_padding_mask=key_padding_mask, need_weights=need_weights,
+            #     attn_mask=attn_mask, use_separate_proj_weight=True,
+            #     q_proj_weight=self.q_proj_weight, k_proj_weight=self.k_proj_weight,
+            #     v_proj_weight=self.v_proj_weight, average_attn_weights=average_attn_weights)
+        else:  # go here
+            attn_output, attn_output_weights, attn_output_weights_logits = multi_head_attention_forward(
+                query, key, value, value_teacher, self.embed_dim, self.num_heads,
+                self.in_proj_weight, self.in_proj_bias,
+                self.bias_k, self.bias_v, self.add_zero_attn,
+                self.dropout, self.out_proj.weight, self.out_proj.bias,
+                # out_proj_weight_teacher=self.out_proj_teacher.weight,
+                # out_proj_bias_teacher=self.out_proj_teacher.bias,
+                training=self.training,
+                key_padding_mask=key_padding_mask, need_weights=need_weights,
+                attn_mask=attn_mask, average_attn_weights=average_attn_weights,
+                #
+                # pre_calculated_attn=pre_calculated_attn,
+                # freeze_wq=freeze_wq,
+                # freeze_wk=freeze_wk,
+                # freeze_wv=freeze_wv,
+                # freeze_wq_teacher=freeze_wq_teacher,
+                # freeze_wv_teacher=freeze_wv_teacher,
+                # freeze_v_teacher=freeze_v_teacher,
+                # debug_st_attn_sweep_n_attn_heads=debug_st_attn_sweep_n_attn_heads,
+                # token_sweep_mask=token_sweep_mask,
+            )
 
-            # use_separate_proj_weight=True,
-            # q_proj_weight=self.q_proj_weight, k_proj_weight=self.k_proj_weight,
-            # v_proj_weight=self.v_proj_weight,
-
-            share_q=self.share_q,
-            share_k=self.share_k,
-            share_v=self.share_v,
-            share_attn_map=self.share_attn_map,
-            share_out_proj=self.share_out_proj,
-        )
-
+            # attn_output, attn_output_weights = F.multi_head_attention_forward(
+            #     query, key, value, self.embed_dim, self.num_heads,
+            #     self.in_proj_weight, self.in_proj_bias,
+            #     self.bias_k, self.bias_v, self.add_zero_attn,
+            #     self.dropout, self.out_proj.weight, self.out_proj.bias,
+            #     training=self.training,
+            #     key_padding_mask=key_padding_mask, need_weights=need_weights,
+            #     attn_mask=attn_mask, average_attn_weights=average_attn_weights)
         if self.batch_first and is_batched:
             return attn_output.transpose(1, 0), attn_output_weights, attn_output_weights_logits
         else:
             return attn_output, attn_output_weights, attn_output_weights_logits
 
-# def _linear(freeze_, q_, w_q_, b_q_):
-#     if freeze_:
-#         # add (w_q * 0 + b_q * 0) to use w_q, b_q in the graph but no grad will propagate back (so they will
-#         # not be updated forever.
-#         Q_ = linear(q_, w_q_.detach(), b_q_.detach()) + (torch.matmul(torch.zeros_like(q_), w_q_) + b_q_ * 0)
-#     else:
-#         Q_ = linear(q_, w_q_, b_q_)
-#     return Q_
+
+def _in_projection_packed(
+        q: Tensor,
+        k: Tensor,
+        v: Tensor,
+        v_teacher: Tensor,
+        w: Tensor,
+        b: Optional[Tensor] = None,
+        freeze_wq: bool = False,
+        freeze_wk: bool = False,
+        freeze_wv: bool = False,
+        freeze_wv_teacher: bool = False,
+) -> List[Tensor]:
+    r"""
+    Performs the in-projection step of the attention operation, using packed weights.
+    Output is a triple containing projection tensors for query, key and value.
+    Args:
+        q, k, v: query, key and value tensors to be projected. For self-attention,
+            these are typically the same tensor; for encoder-decoder attention,
+            k and v are typically the same tensor. (We take advantage of these
+            identities for performance if they are present.) Regardless, q, k and v
+            must share a common embedding dimension; otherwise their shapes may vary.
+        w: projection weights for q, k and v, packed into a single tensor. Weights
+            are packed along dimension 0, in q, k, v order.
+        b: optional projection biases for q, k and v, packed into a single tensor
+            in q, k, v order.
+    Shape:
+        Inputs:
+        - q: :math:`(..., E)` where E is the embedding dimension
+        - k: :math:`(..., E)` where E is the embedding dimension
+        - v: :math:`(..., E)` where E is the embedding dimension
+        - w: :math:`(E * 3, E)` where E is the embedding dimension
+        - b: :math:`E * 3` where E is the embedding dimension
+        Output:
+        - in output list :math:`[q', k', v']`, each output tensor will have the
+            same shape as the corresponding input tensor.
+    """
+    E = q.size(-1)
+    if k is v:  # will not go to this branch
+        raise NotImplementedError
+        if q is k:
+            # self-attention
+            # return linear(q, w, b).chunk(3, dim=-1)
+            return linear(q, w, b).chunk(4, dim=-1)
+        else:
+            # encoder-decoder attention
+            w_q, w_kv = w.split([E, E * 2])
+            if b is None:
+                b_q = b_kv = None
+            else:
+                b_q, b_kv = b.split([E, E * 2])
+            return (linear(q, w_q, b_q),) + linear(k, w_kv, b_kv).chunk(2, dim=-1)
+    else:
+        # w_q, w_k, w_v = w.chunk(3)
+        w_q, w_k, w_v, w_v_teacher = w.chunk(4)
+        if b is None:
+            # b_q = b_k = b_v = None
+            b_q = b_k = b_v = b_v_teacher = None
+        else:
+            # b_q, b_k, b_v = b.chunk(3)
+            b_q, b_k, b_v, b_v_teacher = b.chunk(4)
+
+        # =======================
+        # print(f'w_q = {w_q.view(-1)[:4]}, b_q = {b_q.view(-1)[:4]}')
+        # print(f'w_k = {w_k.view(-1)[:4]}, b_k = {b_k.view(-1)[:4]}')
+        # print(f'w_v = {w_v.view(-1)[:4]}, b_v = {b_v.view(-1)[:4]}')
+
+        # Modification here
+        # if freeze_wq or freeze_wk or freeze_wv or freeze_wq_teacher or freeze_wv_teacher:
+        Q = linear_(freeze_wq, q, w_q, b_q)
+        K = linear_(freeze_wk, k, w_k, b_k)
+        V = linear_(freeze_wv, v, w_v, b_v)
+        V_teacher = linear_(freeze_wv_teacher, v_teacher, w_v_teacher, b_v_teacher)
+        return Q, K, V, V_teacher
+        # =======================
+        #
+        # else:
+        #     return linear(q, w_q, b_q), linear(k, w_k, b_k), linear(v, w_v, b_v), \
+        #            linear(q_teacher, w_q_teacher, b_q_teacher), \
+        #            linear(v_teacher, w_v_teacher, b_v_teacher)
+
+
+def linear_(freeze_, q_, w_q_, b_q_):
+    if freeze_:
+        # add (w_q * 0 + b_q * 0) to use w_q, b_q in the graph but no grad will propagate back (so they will
+        # not be updated forever.
+        Q_ = linear(q_, w_q_.detach(), b_q_.detach()) + (torch.matmul(torch.zeros_like(q_), w_q_) + b_q_ * 0)
+    else:
+        Q_ = linear(q_, w_q_, b_q_)
+    return Q_
 
 
 def _in_projection(
         q: Tensor,
         k: Tensor,
         v: Tensor,
-        q_teacher: Tensor,
-        k_teacher: Tensor,
+        v_teacher: Tensor,
         w_q: Tensor,
         w_k: Tensor,
         w_v: Tensor,
-        w_q_teacher: Tensor,
-        w_k_teacher: Tensor,
+        w_v_teacher: Tensor,
         b_q: Optional[Tensor] = None,
         b_k: Optional[Tensor] = None,
         b_v: Optional[Tensor] = None,
-        b_q_teacher: Optional[Tensor] = None,
-        b_k_teacher: Optional[Tensor] = None,
+        b_v_teacher: Optional[Tensor] = None,
+        freeze_wq: bool = False,
+        freeze_wk: bool = False,
+        freeze_wv: bool = False,
+        freeze_wv_teacher: bool = False,
 ) -> Tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:  # -> Tuple[Tensor, Tensor, Tensor]:
     r"""
     Performs the in-projection step of the attention operation. This is simply
@@ -448,111 +536,73 @@ def _in_projection(
          - v': :math:`[Vdims..., Eq]`
     """
     Eq, Ek, Ev = q.size(-1), k.size(-1), v.size(-1)
-    Ek_teacher = k_teacher.size(-1)
-    Eq_teacher = q_teacher.size(-1)
+    Ev_teacher = v_teacher.size(-1)
     assert w_q.shape == (Eq, Eq), f"expecting query weights shape of {(Eq, Eq)}, but got {w_q.shape}"
     assert w_k.shape == (Eq, Ek), f"expecting key weights shape of {(Eq, Ek)}, but got {w_k.shape}"
     assert w_v.shape == (Eq, Ev), f"expecting value weights shape of {(Eq, Ev)}, but got {w_v.shape}"
-    assert w_q_teacher.shape == (Eq, Eq_teacher), f"expecting teacher key weights shape of {(Eq, Eq_teacher)}, " \
-                                                  f"but got {w_q_teacher.shape}"
-    assert w_k_teacher.shape == (Eq, Ek_teacher), f"expecting teacher key weights shape of {(Eq, Ek_teacher)}, " \
-                                                  f"but got {w_k_teacher.shape}"
+    # assert w_q_teacher.shape == (Eq, Eq_teacher), f"expecting teacher key weights shape of {(Eq, Eq_teacher)}, " \
+    #                                               f"but got {w_q_teacher.shape}"
+    assert w_v_teacher.shape == (Eq, Ev_teacher), f"expecting teacher key weights shape of {(Eq, Ev_teacher)}, " \
+                                                  f"but got {w_v_teacher.shape}"
 
     assert b_q is None or b_q.shape == (Eq,), f"expecting query bias shape of {(Eq,)}, but got {b_q.shape}"
     assert b_k is None or b_k.shape == (Eq,), f"expecting key bias shape of {(Eq,)}, but got {b_k.shape}"
     assert b_v is None or b_v.shape == (Eq,), f"expecting value bias shape of {(Eq,)}, but got {b_v.shape}"
-    assert b_q_teacher is None or b_q_teacher.shape == (Eq,), \
-        f"expecting teacher key bias shape of {(Eq,)}, but got {b_q_teacher.shape}"
-    assert b_k_teacher is None or b_k_teacher.shape == (Eq,), \
-        f"expecting teacher key bias shape of {(Eq,)}, but got {b_k_teacher.shape}"
+    # assert b_q_teacher is None or b_q_teacher.shape == (Eq,), \
+    #     f"expecting teacher key bias shape of {(Eq,)}, but got {b_q_teacher.shape}"
+    assert b_v_teacher is None or b_v_teacher.shape == (Eq,), \
+        f"expecting teacher key bias shape of {(Eq,)}, but got {b_v_teacher.shape}"
 
     # return linear(q, w_q, b_q), linear(k, w_k, b_k), linear(v, w_v, b_v), \
-    #        linear(q_teacher, w_q_teacher, b_q_teacher), linear(k_teacher, w_k_teacher, b_k_teacher)
-    Q = _linear(q, w_q, b_q)
-    K = _linear(k, w_k, b_k)
-    V = _linear(v, w_v, b_v)
-    Q_teacher = _linear(q_teacher, w_q_teacher, b_q_teacher)
-    K_teacher = _linear( k_teacher, w_k_teacher, b_k_teacher)
-    return Q, K, V, Q_teacher, K_teacher
+    #        linear(q_teacher, w_q_teacher, b_q_teacher), linear(v_teacher, w_v_teacher, b_v_teacher)
+    Q = linear_(freeze_wq, q, w_q, b_q)
+    K = linear_(freeze_wk, k, w_k, b_k)
+    V = linear_(freeze_wv, v, w_v, b_v)
+
+    V_teacher = linear_(freeze_wv_teacher, v_teacher, w_v_teacher, b_v_teacher)
+    return Q, K, V, V_teacher
 
 
-"""
-
-attn_output, attn_output_weights, attn_output_weights_logits = multi_head_attention_forward(
-            query, key, value, query_teacher, key_teacher, value_teacher,
-             self.embed_dim, self.num_heads,
-            in_proj_weight=in_proj_weight, in_proj_bias=in_proj_bias,
-            in_proj_weight_teacher=in_proj_weight_teacher, in_proj_bias_teacher=in_proj_bias_teacher,
-            bias_k=self.bias_k, bias_v=self.bias_v, add_zero_attn=self.add_zero_attn,
-            dropout_p=self.dropout,
-            out_proj_weight=self.out_proj.weight, out_proj_bias=self.out_proj.bias,
-            out_proj_weight_teacher=self.out_proj_teacher.weight if self.out_proj_teacher is not None else None,
-            out_proj_bias_teacher=self.out_proj_teacher.bias if self.out_proj_teacher is not None else None,
-            training=self.training,
-            
-            key_padding_mask=key_padding_mask, need_weights=need_weights,
-            attn_mask=attn_mask, average_attn_weights=average_attn_weights,
-
-            # use_separate_proj_weight=True,
-            # q_proj_weight=self.q_proj_weight, k_proj_weight=self.k_proj_weight,
-            # v_proj_weight=self.v_proj_weight,
-
-            share_q=self.share_q,
-            share_k=self.share_k,
-            share_v=self.share_v,
-            share_attn_map=self.share_attn_map,
-            share_out_proj=self.share_out_proj,
-
-"""
 def multi_head_attention_forward(
         query: Tensor,
         key: Tensor,
         value: Tensor,
-        query_teacher: Tensor,
-        key_teacher: Tensor,
         value_teacher: Tensor,
         embed_dim_to_check: int,
         num_heads: int,
-        in_proj_weight: list,  # Optional[Tensor],
-        in_proj_bias: list,  # Optional[Tensor],
-        in_proj_weight_teacher: list,  # Optional[Tensor],
-        in_proj_bias_teacher: list,  # Optional[Tensor],
+        in_proj_weight: Optional[Tensor],
+        in_proj_bias: Optional[Tensor],
         bias_k: Optional[Tensor],
         bias_v: Optional[Tensor],
         add_zero_attn: bool,
         dropout_p: float,
         out_proj_weight: Tensor,
         out_proj_bias: Optional[Tensor],
-        out_proj_weight_teacher: Optional[Tensor] = None,  # TODO: add this variable
-        out_proj_bias_teacher: Optional[Tensor] =  None,  # TODO: add this variable
+
+        # out_proj_weight_teacher: Tensor,  # TODO: add this variable
+        # out_proj_bias_teacher: Optional[Tensor],  # TODO: add this variable
+
         training: bool = True,
         key_padding_mask: Optional[Tensor] = None,
         need_weights: bool = True,
         attn_mask: Optional[Tensor] = None,
-        # use_separate_proj_weight: bool = False,
-        # q_proj_weight: Optional[Tensor] = None,
-        # k_proj_weight: Optional[Tensor] = None,
-        # v_proj_weight: Optional[Tensor] = None,
-        # q_teacher_proj_weight: Optional[Tensor] = None,  # TODO: parent function not adapted to this variable yet.
-        # k_teacher_proj_weight: Optional[Tensor] = None,  # TODO: parent function not adapted to this variable yet.
+        use_separate_proj_weight: bool = False,
+        q_proj_weight: Optional[Tensor] = None,
+        k_proj_weight: Optional[Tensor] = None,
+        v_proj_weight: Optional[Tensor] = None,
+        v_teacher_proj_weight: Optional[Tensor] = None,  # TODO: parent function not adapted to this variable yet.
         static_k: Optional[Tensor] = None,
         static_v: Optional[Tensor] = None,
         average_attn_weights: bool = True,
-
-        share_q=False,
-        share_k=False,
-        share_v=False,
-        share_attn_map=False,
-        share_out_proj=False,
 
         # pre_calculated_attn: Optional[Tensor] = None,  # Tricks to use outside attention.
         # Tricks to freeze wq, wk, wv during training, set their require_grad = False in this Function
         # freeze_wq: bool = False,
         # freeze_wk: bool = False,
         # freeze_wv: bool = False,
-        #
-        # freeze_wq_teacher: bool = False,
-        # freeze_wk_teacher: bool = False,  # TODO: parent function not adapted to this variable yet.
+
+        # # freeze_wq_teacher: bool = False,
+        # freeze_wv_teacher: bool = False,  # TODO: parent function not adapted to this variable yet.
         # freeze_v_teacher: bool = False,
         # debug_st_attn_sweep_n_attn_heads=0,
         # token_sweep_mask=None
@@ -616,41 +666,41 @@ def multi_head_attention_forward(
           :math:`S` is the source sequence length. If ``average_attn_weights=False``, returns attention weights per
           head of shape :math:`(num_heads, L, S)` when input is unbatched or :math:`(N, num_heads, L, S)`.
     """
-    # tens_ops = (query, key, value, in_proj_weight, in_proj_bias, bias_k, bias_v, out_proj_weight, out_proj_bias)
-    # if has_torch_function(tens_ops):  # False,
-    #     return handle_torch_function(
-    #         multi_head_attention_forward,
-    #         tens_ops,
-    #         query,
-    #         key,
-    #         value,
-    #         embed_dim_to_check,
-    #         num_heads,
-    #         in_proj_weight,
-    #         in_proj_bias,
-    #         bias_k,
-    #         bias_v,
-    #         add_zero_attn,
-    #         dropout_p,
-    #         out_proj_weight,
-    #         out_proj_bias,
-    #         training=training,
-    #         key_padding_mask=key_padding_mask,
-    #         need_weights=need_weights,
-    #         attn_mask=attn_mask,
-    #         use_separate_proj_weight=use_separate_proj_weight,
-    #         q_proj_weight=q_proj_weight,
-    #         k_proj_weight=k_proj_weight,
-    #         v_proj_weight=v_proj_weight,
-    #         static_k=static_k,
-    #         static_v=static_v,
-    #         average_attn_weights=average_attn_weights,
-    #
-    #         # pre_calculated_attn=pre_calculated_attn,
-    #         # freeze_wq=freeze_wq,
-    #         # freeze_wk=freeze_wk,
-    #         # freeze_wv=freeze_wv,
-    #     )
+    tens_ops = (query, key, value, in_proj_weight, in_proj_bias, bias_k, bias_v, out_proj_weight, out_proj_bias)
+    if has_torch_function(tens_ops):  # False,
+        return handle_torch_function(
+            multi_head_attention_forward,
+            tens_ops,
+            query,
+            key,
+            value,
+            embed_dim_to_check,
+            num_heads,
+            in_proj_weight,
+            in_proj_bias,
+            bias_k,
+            bias_v,
+            add_zero_attn,
+            dropout_p,
+            out_proj_weight,
+            out_proj_bias,
+            training=training,
+            key_padding_mask=key_padding_mask,
+            need_weights=need_weights,
+            attn_mask=attn_mask,
+            use_separate_proj_weight=use_separate_proj_weight,
+            q_proj_weight=q_proj_weight,
+            k_proj_weight=k_proj_weight,
+            v_proj_weight=v_proj_weight,
+            static_k=static_k,
+            static_v=static_v,
+            average_attn_weights=average_attn_weights,
+
+            # pre_calculated_attn=pre_calculated_attn,
+            # freeze_wq=freeze_wq,
+            # freeze_wk=freeze_wk,
+            # freeze_wv=freeze_wv,
+        )
 
     is_batched = _mha_shape_check(query, key, value, key_padding_mask, attn_mask, num_heads)
 
@@ -658,8 +708,6 @@ def multi_head_attention_forward(
     # is batched, run the computation and before returning squeeze the
     # batch dimension so that the output doesn't carry this temporary batch dimension.
     if not is_batched:
-        raise NotImplementedError
-
         # unsqueeze if the input is unbatched
         query = query.unsqueeze(1)
         key = key.unsqueeze(1)
@@ -693,47 +741,40 @@ def multi_head_attention_forward(
     #
     # compute in-projection
     #
-    # if not use_separate_proj_weight:
-    #     assert in_proj_weight is not None, "use_separate_proj_weight is False but in_proj_weight is None"
-    #     # q, k, v = _in_projection_packed(query, key, value, in_proj_weight, in_proj_bias)
-    #     q, k, v, q_teacher, k_teacher = _in_projection_packed(query, key, value, query_teacher, key_teacher,
-    #                                                           in_proj_weight, in_proj_bias,
-    #                                                           freeze_wq=freeze_wq, freeze_wk=freeze_wk,
-    #                                                           freeze_wv=freeze_wv,
-    #                                                           freeze_wq_teacher=freeze_wq_teacher,
-    #                                                           freeze_wk_teacher=freeze_wk_teacher
-    #                                                           )
-    # else:
-    #     assert q_proj_weight is not None, "use_separate_proj_weight is True but q_proj_weight is None"
-    #     assert k_proj_weight is not None, "use_separate_proj_weight is True but k_proj_weight is None"
-    #     assert v_proj_weight is not None, "use_separate_proj_weight is True but v_proj_weight is None"
-    #     assert q_teacher_proj_weight is not None, "use_separate_proj_weight is True but q_teacher_proj_weight is None"
-    #     assert k_teacher_proj_weight is not None, "use_separate_proj_weight is True but k_teacher_proj_weight is None"
+    if not use_separate_proj_weight:
+        assert in_proj_weight is not None, "use_separate_proj_weight is False but in_proj_weight is None"
+        # q, k, v = _in_projection_packed(query, key, value, in_proj_weight, in_proj_bias)
+        q, k, v, v_teacher = _in_projection_packed(query, key, value, value_teacher,
+                                                   in_proj_weight, in_proj_bias,
+                                                   # freeze_wq=freeze_wq, freeze_wk=freeze_wk,
+                                                   # freeze_wv=freeze_wv,
+                                                   # freeze_wq_teacher=freeze_wq_teacher,
+                                                   # freeze_wv_teacher=freeze_wv_teacher
+                                                   )
+    else:
+        assert q_proj_weight is not None, "use_separate_proj_weight is True but q_proj_weight is None"
+        assert k_proj_weight is not None, "use_separate_proj_weight is True but k_proj_weight is None"
+        assert v_proj_weight is not None, "use_separate_proj_weight is True but v_proj_weight is None"
+        # assert v_teacher_proj_weight is not None, "use_separate_proj_weight is True but v_teacher_proj_weight is None"
+        assert v_teacher_proj_weight is not None, "use_separate_proj_weight is True but v_teacher_proj_weight is None"
 
         if in_proj_bias is None:
             # b_q = b_k = b_v = None
-            b_q = b_k = b_v = b_q_teacher = b_k_teacher = None
+            b_q = b_k = b_v = b_v_teacher = None
         else:
             # b_q, b_k, b_v = in_proj_bias.chunk(3)
-            b_q, b_k, b_v, b_q_teacher, b_k_teacher = in_proj_bias.chunk(5)
+            b_q, b_k, b_v, b_v_teacher = in_proj_bias.chunk(4)
         # q, k, v = _in_projection(query, key, value, q_proj_weight, k_proj_weight, v_proj_weight, b_q, b_k, b_v)
-
-        in_proj_weight = [self.q_proj_weight, self.k_proj_weight, self.v_proj_weight]
-        in_proj_bias = [self.q_in_proj_bias, self.k_in_proj_bias, self.v_in_proj_bias]
-        in_proj_weight_teacher = [self.q_teacher_proj_weight, self.k_teacher_proj_weight, self.v_teacher_proj_weight]
-        in_proj_bias_teacher = [self.q_teacher_in_proj_bias, self.k_teacher_in_proj_bias, self.v_teacher_in_proj_bias]
-
-
-        q, k, v, q_teacher, k_teacher = _in_projection(
-            query, key, value, query_teacher, key_teacher,
-           q_proj_weight, k_proj_weight, v_proj_weight,
-           q_teacher_proj_weight, k_teacher_proj_weight,
-           b_q, b_k, b_v, b_q_teacher, b_k_teacher,
-           # freeze_wq=freeze_wq, freeze_wk=freeze_wk,
-           # freeze_wv=freeze_wv,
-           # freeze_wq_teacher=freeze_wq_teacher,
-           # freeze_wk_teacher=freeze_wk_teacher
-           )
+        q, k, v, v_teacher = _in_projection(query, key, value, value_teacher,
+                                            q_proj_weight, k_proj_weight, v_proj_weight,
+                                            v_teacher_proj_weight,
+                                            b_q, b_k, b_v,
+                                            b_v_teacher,
+                                            # freeze_wq=freeze_wq, freeze_wk=freeze_wk,
+                                            # freeze_wv=freeze_wv,
+                                            # freeze_wq_teacher=freeze_wq_teacher,
+                                            # freeze_wv_teacher=freeze_wv_teacher
+                                            )
 
     # prep attention mask
     if attn_mask is not None:
@@ -765,7 +806,7 @@ def multi_head_attention_forward(
         k = torch.cat([k, bias_k.repeat(1, bsz, 1)])
         v = torch.cat([v, bias_v.repeat(1, bsz, 1)])
 
-        # k_teacher = torch.cat([k_teacher, bias_k.repeat(1, bsz, 1)])  # TODO: check if this is correct
+        # v_teacher = torch.cat([v_teacher, bias_k.repeat(1, bsz, 1)])  # TODO: check if this is correct
         if attn_mask is not None:
             attn_mask = pad(attn_mask, (0, 1))
         if key_padding_mask is not None:
@@ -773,17 +814,16 @@ def multi_head_attention_forward(
     else:
         assert bias_k is None
         assert bias_v is None
-        # assert bias_k_teacher is None
+        # assert bias_v_teacher is None
 
     #
     # reshape q, k, v for multihead attention and make em batch first
     #
     q = q.contiguous().view(tgt_len, bsz * num_heads, head_dim).transpose(0, 1)
-    q_teacher = q_teacher.contiguous().view(tgt_len, bsz * num_heads, head_dim).transpose(0, 1)
+    # q_teacher = q_teacher.contiguous().view(tgt_len, bsz * num_heads, head_dim).transpose(0, 1)
 
     if static_k is None:
         k = k.contiguous().view(k.shape[0], bsz * num_heads, head_dim).transpose(0, 1)
-        k_teacher = k_teacher.contiguous().view(k_teacher.shape[0], bsz * num_heads, head_dim).transpose(0, 1)
     else:
         # TODO finish disentangling control flow so we don't do in-projections when statics are passed
         assert static_k.size(0) == bsz * num_heads, \
@@ -793,6 +833,8 @@ def multi_head_attention_forward(
         k = static_k
     if static_v is None:
         v = v.contiguous().view(v.shape[0], bsz * num_heads, head_dim).transpose(0, 1)
+        # ----
+        v_teacher = v_teacher.contiguous().view(v_teacher.shape[0], bsz * num_heads, head_dim).transpose(0, 1)
     else:
         # TODO finish disentangling control flow so we don't do in-projections when statics are passed
         assert static_v.size(0) == bsz * num_heads, \
@@ -843,60 +885,59 @@ def multi_head_attention_forward(
 
     B, Nt, E = q.shape
     q_scaled = q / math.sqrt(E)
-    q_teacher_scaled = q_teacher / math.sqrt(E)
+    # q_teacher_scaled = q_teacher / math.sqrt(E)
     # ======================== share Q, V with backpropagation
     if attn_mask is not None:
         attn_output_weights = torch.baddbmm(attn_mask, q_scaled, k.transpose(-2, -1))
         # no backpropagation for Q
-        attn_output_weights_teacher = torch.baddbmm(attn_mask, q_teacher_scaled, k_teacher.transpose(-2, -1))
+        # attn_output_weights_teacher = torch.baddbmm(attn_mask, q_teacher_scaled, v_teacher.transpose(-2, -1))
     else:
         attn_output_weights = torch.bmm(q_scaled, k.transpose(-2, -1))
-        attn_output_weights_teacher = torch.bmm(q_teacher_scaled, k_teacher.transpose(-2, -1))
+        # attn_output_weights_teacher = torch.bmm(q_teacher_scaled, v_teacher.transpose(-2, -1))
 
     # =================================
     # save the logits for calculating the KL_loss
     attn_output_weights_logits = attn_output_weights.clone()
-    attn_output_weights_logits_teacher = attn_output_weights_teacher.clone()
+    # attn_output_weights_logits_teacher = attn_output_weights_teacher.clone()
     # =================================
 
     attn_output_weights = softmax(attn_output_weights, dim=-1)  # torch.Size([16, 696, 696])
-    attn_output_weights_teacher = softmax(attn_output_weights_teacher, dim=-1)  # torch.Size([16, 696, 696])
+    # attn_output_weights_teacher = softmax(attn_output_weights_teacher, dim=-1)  # torch.Size([16, 696, 696])
 
-
-    if debug_st_attn_sweep_n_attn_heads > 0:  #  and not self.training
-        attn_output_weights = attn_output_weights.view(bsz, num_heads, tgt_len, src_len)
-        attn_output_weights_teacher = attn_output_weights_teacher.view(bsz, num_heads, tgt_len, src_len)
-
-        back_student_attn = attn_output_weights[:, :debug_st_attn_sweep_n_attn_heads, :, :].clone()
-        back_teacher_attn = attn_output_weights_teacher[:, :debug_st_attn_sweep_n_attn_heads, :, :].clone()
-
-        # sweep the attn map of teacher and student
-        attn_output_weights[:, :debug_st_attn_sweep_n_attn_heads, :, :] = \
-            attn_output_weights[:, :debug_st_attn_sweep_n_attn_heads, :, :] * 0 + back_teacher_attn
-        attn_output_weights_teacher[:, :debug_st_attn_sweep_n_attn_heads, :, :] = \
-            attn_output_weights_teacher[:, :debug_st_attn_sweep_n_attn_heads, :, :] * 0 + back_student_attn
-
-        attn_output_weights = attn_output_weights.contiguous().view(bsz * num_heads, tgt_len, src_len)
-        attn_output_weights_teacher = attn_output_weights_teacher.contiguous().view(bsz * num_heads, tgt_len, src_len)
-        
-    if token_sweep_mask is not None:
-        # token_sweep_mask  (N, B) -> (B, N) -> 
-        token_sweep_mask = token_sweep_mask.transpose(0, 1).view(bsz, 1, src_len, 1). \
-            expand(-1, num_heads, -1, src_len)
-
-        attn_output_weights = attn_output_weights.view(bsz, num_heads, tgt_len, src_len)
-        attn_output_weights_teacher = attn_output_weights_teacher.view(bsz, num_heads, tgt_len, src_len)
-
-        back_student_attn = attn_output_weights.clone()
-        back_teacher_attn = attn_output_weights_teacher.clone()
-
-        # sweep the attn map of teacher and student
-        attn_output_weights[token_sweep_mask] = back_teacher_attn[token_sweep_mask]
-        attn_output_weights_teacher[token_sweep_mask] = back_student_attn[token_sweep_mask]
-
-        attn_output_weights = attn_output_weights.contiguous().view(bsz * num_heads, tgt_len, src_len)
-        attn_output_weights_teacher = attn_output_weights_teacher.contiguous().view(bsz * num_heads, tgt_len, src_len)
-        
+    # if debug_st_attn_sweep_n_attn_heads > 0:  #  and not self.training
+    #     attn_output_weights = attn_output_weights.view(bsz, num_heads, tgt_len, src_len)
+    #     # attn_output_weights_teacher = attn_output_weights_teacher.view(bsz, num_heads, tgt_len, src_len)
+    #
+    #     back_student_attn = attn_output_weights[:, :debug_st_attn_sweep_n_attn_heads, :, :].clone()
+    #     # back_teacher_attn = attn_output_weights_teacher[:, :debug_st_attn_sweep_n_attn_heads, :, :].clone()
+    #
+    #     # # sweep the attn map of teacher and student
+    #     # attn_output_weights[:, :debug_st_attn_sweep_n_attn_heads, :, :] = \
+    #     #     attn_output_weights[:, :debug_st_attn_sweep_n_attn_heads, :, :] * 0 + back_teacher_attn
+    #     # attn_output_weights_teacher[:, :debug_st_attn_sweep_n_attn_heads, :, :] = \
+    #     #     attn_output_weights_teacher[:, :debug_st_attn_sweep_n_attn_heads, :, :] * 0 + back_student_attn
+    #
+    #     attn_output_weights = attn_output_weights.contiguous().view(bsz * num_heads, tgt_len, src_len)
+    #     # attn_output_weights_teacher = attn_output_weights_teacher.contiguous().view(bsz * num_heads, tgt_len, src_len)
+    #
+    # if token_sweep_mask is not None:
+    #     # token_sweep_mask  (N, B) -> (B, N) ->
+    #     token_sweep_mask = token_sweep_mask.transpose(0, 1).view(bsz, 1, src_len, 1). \
+    #         expand(-1, num_heads, -1, src_len)
+    #
+    #     attn_output_weights = attn_output_weights.view(bsz, num_heads, tgt_len, src_len)
+    #     attn_output_weights_teacher = attn_output_weights_teacher.view(bsz, num_heads, tgt_len, src_len)
+    #
+    #     back_student_attn = attn_output_weights.clone()
+    #     back_teacher_attn = attn_output_weights_teacher.clone()
+    #
+    #     # sweep the attn map of teacher and student
+    #     attn_output_weights[token_sweep_mask] = back_teacher_attn[token_sweep_mask]
+    #     attn_output_weights_teacher[token_sweep_mask] = back_student_attn[token_sweep_mask]
+    #
+    #     attn_output_weights = attn_output_weights.contiguous().view(bsz * num_heads, tgt_len, src_len)
+    #     attn_output_weights_teacher = attn_output_weights_teacher.contiguous().view(bsz * num_heads, tgt_len, src_len)
+    #
     # # -------------------------------------------
     # # if the attention is given, it should be handled here.
     # if pre_calculated_attn is not None:
@@ -906,15 +947,15 @@ def multi_head_attention_forward(
     # # -------------------------------------------
     if dropout_p > 0.0:
         attn_output_weights = dropout(attn_output_weights, p=dropout_p)
-        attn_output_weights_teacher = dropout(attn_output_weights_teacher, p=dropout_p)
+        # attn_output_weights_teacher = dropout(attn_output_weights_teacher, p=dropout_p)
 
     attn_output = torch.bmm(attn_output_weights, v)
 
-    if freeze_v_teacher:  #
-        # no backpropagation for V
-        attn_output_teacher = torch.bmm(attn_output_weights_teacher, v.clone().detach())
-    else:
-        attn_output_teacher = torch.bmm(attn_output_weights_teacher, v)
+    # if freeze_v_teacher:  #
+    #     # no backpropagation for V
+    #     attn_output_teacher = torch.bmm(attn_output_weights_teacher, v.clone().detach())
+    # else:
+    attn_output_teacher = torch.bmm(attn_output_weights, v_teacher)
 
     attn_output = attn_output.transpose(0, 1).contiguous().view(tgt_len * bsz, embed_dim)
     attn_output = linear(attn_output, out_proj_weight, out_proj_bias)
@@ -923,21 +964,21 @@ def multi_head_attention_forward(
     # =================================
     attn_output_teacher = attn_output_teacher.transpose(0, 1).contiguous().view(tgt_len * bsz, embed_dim)
     # attn_output_teacher = linear(attn_output_teacher, out_proj_weight_teacher, out_proj_bias_teacher)
-    attn_output_teacher = linear(attn_output_teacher,  out_proj_weight, out_proj_bias)
+    attn_output_teacher = linear(attn_output_teacher, out_proj_weight, out_proj_bias)
     attn_output_teacher = attn_output_teacher.view(tgt_len, bsz, attn_output_teacher.size(1))
 
     if need_weights:
         # optionally average attention weights over heads
         attn_output_weights = attn_output_weights.view(bsz, num_heads, tgt_len, src_len)
-        attn_output_weights_teacher = attn_output_weights_teacher.view(bsz, num_heads, tgt_len, src_len)
+        # attn_output_weights_teacher = attn_output_weights_teacher.view(bsz, num_heads, tgt_len, src_len)
         # =========================================-
         attn_output_weights_logits = attn_output_weights_logits.view(bsz, num_heads, tgt_len, src_len)
-        attn_output_weights_logits_teacher = attn_output_weights_logits_teacher.view(bsz, num_heads, tgt_len, src_len)
+        # attn_output_weights_logits_teacher = attn_output_weights_logits_teacher.view(bsz, num_heads, tgt_len, src_len)
         # =========================================-
 
         if average_attn_weights:
             attn_output_weights = attn_output_weights.sum(dim=1) / num_heads
-            attn_output_weights_teacher = attn_output_weights_teacher.sum(dim=1) / num_heads
+            # attn_output_weights_teacher = attn_output_weights_teacher.sum(dim=1) / num_heads
 
         if not is_batched:
             # squeeze the output if input was unbatched
@@ -945,9 +986,9 @@ def multi_head_attention_forward(
             attn_output_weights = attn_output_weights.squeeze(0)
 
             attn_output_teacher = attn_output_teacher.squeeze(1)
-            attn_output_weights_teacher = attn_output_weights_teacher.squeeze(0)
-        return (attn_output, attn_output_teacher), (attn_output_weights, attn_output_weights_teacher), \
-               (attn_output_weights_logits, attn_output_weights_logits_teacher)
+            # attn_output_weights_teacher = attn_output_weights_teacher.squeeze(0)
+        return (attn_output, attn_output_teacher), (attn_output_weights, attn_output_weights), \
+               (attn_output_weights_logits, attn_output_weights_logits)
     else:
         if not is_batched:
             # squeeze the output if input was unbatched

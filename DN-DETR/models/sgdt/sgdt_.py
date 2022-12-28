@@ -359,7 +359,7 @@ class SGDT(nn.Module):
         self.freeze_online_encoder_distillation = args.freeze_online_encoder_distillation
         self.attn_distillation_teacher_with_grad = args.attn_distillation_teacher_with_grad
         self.freeze_attn_online_encoder_distillation = args.freeze_attn_online_encoder_distillation
-        # self.double_head_transformer = args.double_head_transformer
+        self.double_head_transformer = args.double_head_transformer
 
         self.training_only_distill_student_attn = args.training_only_distill_student_attn \
                                                   or args.training_only_distill_student_attn_not_free_backbone
